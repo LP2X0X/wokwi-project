@@ -1,9 +1,12 @@
 # Susuwatori Eyes — ESP32‑S3 + SSD1306 (Wokwi)
 
-A tiny PlatformIO project that drives a 128×64 SSD1306 OLED on an ESP32‑S3 to
+A tiny PlatformIO project that drives 128×64 SSD1306 OLEDs on an ESP32‑S3 to
 render a pair of cartoon eyes. The artwork is split into four independent
 layers (left/right sclera + left/right pupil) so each can be transformed and
-animated separately.
+animated separately. The Wokwi diagram has three screens: two render each
+eye big enough to fill the physical fur-cutout build, and a third shows
+both eyes together at native size so you can see how they animate as a
+pair.
 
 The project runs in [Wokwi](https://wokwi.com/) — no physical hardware required.
 
@@ -89,14 +92,47 @@ The CLI reads `wokwi.toml` and `diagram.json` from the current directory.
 
 ## Wiring (in `diagram.json`)
 
-| OLED pin | ESP32-S3 pin |
-| -------- | ------------ |
-| `SDA`    | GPIO 2       |
-| `SCL`    | GPIO 1       |
-| `VCC`    | 3V3          |
-| `GND`    | GND          |
+The project drives **three SSD1306 OLEDs** — two physical eyes that go on
+the real model, plus a wokwi-only "preview" screen that shows both eyes
+together so you can sanity-check the animation while you tune it.
 
-I²C address: `0x3C`. These match `SDA_PIN` / `SCL_PIN` in `src/main.cpp`.
+| OLED    | role                       | I²C addr | SDA pin | SCL pin | I²C bus |
+| ------- | -------------------------- | -------- | ------- | ------- | ------- |
+| `oled1` | left eye (physical)        | `0x3C`   | GPIO 2  | GPIO 1  | `Wire`  |
+| `oled2` | right eye (physical)       | `0x3C`   | GPIO 6  | GPIO 5  | `Wire1` |
+| `oled3` | both-eye preview (wokwi)   | `0x3D`   | GPIO 2  | GPIO 1  | `Wire`  |
+
+`VCC` → `3V3`, `GND` → `GND` for all. `oled1` and `oled3` share the same
+bus because they have different addresses (most SSD1306 modules have a
+solder jumper for `0x3D` if you ever want to wire it up for real). On a
+real build the preview module is simply absent — `displayP.begin()`
+returns `false`, `has_preview` stays `false`, and the loop skips it.
+
+The pin assignments match the `*_SDA_PIN` / `*_SCL_PIN` macros at the top
+of `src/main.cpp`; change both sides if you re-wire.
+
+### Two eye geometries, one EyePose
+
+Both physical eyes and the preview screen render from the **same**
+`EyeState` / `EyePose` — so a blink on the preview is the same blink on
+the physical screens. They differ only in geometry:
+
+- **Physical** eyes use `kBigLeftEye` / `kBigRightEye` at `PHYS_SCALE`
+  (default `2.0f`). The sclera is sized to overflow the 128×64 OLED so it
+  fills a larger fur-cutout eye hole. Tune `PHYS_SCALE` in `src/main.cpp`
+  to taste: `1.5` = no overflow, `2.0` = ~12 px clip top/bottom, `2.5+` =
+  wider overflow.
+- **Preview** screen uses `kPreviewLeft` / `kPreviewRight` at native
+  scale (`1.0f`) with the artwork's original positions — both eyes fit on
+  one 128×64 screen so you can see them animate together.
+
+Pupil drift is scaled along with the eye, so motion amplitude looks
+visually proportional on every screen.
+
+> **One screen instead of three?** Delete the screens you don't want from
+> `diagram.json`, drop the matching display + render lines from
+> `main.cpp`. For a single-screen build, render both eyes with
+> `renderEyes(display, kPreviewLeft, kPreviewRight, eyes)`.
 
 ## Eye bitmaps — how the four layers are generated
 
@@ -174,6 +210,11 @@ extensibility playbook, see:
   match the path in `wokwi.toml` (this project uses `esp32s3` for both).
 - **OLED stays blank** — confirm `Wire.begin(SDA_PIN, SCL_PIN)` matches the
   pins in `diagram.json` (`SDA=GPIO2`, `SCL=GPIO1`) and the I²C address is
-  `0x3C`.
+  `0x3C` for the eye modules (`oled1`/`oled2`) and `0x3D` for the preview
+  module (`oled3`).
+- **Preview screen blank but physical eyes work** — `oled3` shares the
+  `Wire` bus with `oled1`; check it's wired to `GPIO 2`/`GPIO 1` and that
+  the `i2cAddress` attr is set to `0x3d`, not `0x3c` (an address collision
+  with `oled1` will silently swallow writes).
 - **PlatformIO complains about `~/.platformio` permissions** — fix with
   `sudo chown -R $(whoami) ~/.platformio` (one‑time).

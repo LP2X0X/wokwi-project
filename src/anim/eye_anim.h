@@ -81,6 +81,13 @@ void renderEyes(Adafruit_SSD1306 &d,
                 const Eye &left, const Eye &right,
                 const EyeState &s);
 
+// Render a single eye on its own display. Convenience overload of
+// renderEyeOn(d, eye, pose) that pulls the pose out of EyeState. Use when
+// each eye lives on its own physical OLED:
+//   renderEyeOn(displayL, kLeftEye,  eyes);
+//   renderEyeOn(displayR, kRightEye, eyes);
+void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s);
+
 // External hook: nudge the sleepy target (e.g. from a light sensor or time
 // of day). The autonomous re-roll inside sleepyUpdate() will eventually
 // overwrite this — call once for "stay sleepy a while", or every frame to

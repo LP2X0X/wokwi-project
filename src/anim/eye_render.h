@@ -22,23 +22,30 @@
 // split costs nothing now and saves a refactor later.
 struct EyeBitmap {
   const uint8_t *bmp;
-  int16_t        w;
+  int16_t        w;   // SOURCE bitmap dims (not scaled)
   int16_t        h;
-  int16_t        x;   // top-left in screen coords
+  int16_t        x;   // dest top-left of the SCALED bitmap, in screen coords
   int16_t        y;
 };
 
 struct PupilBitmap {
   const uint8_t *bmp;
-  int16_t        w;
+  int16_t        w;   // SOURCE bitmap dims (not scaled)
   int16_t        h;
-  int16_t        x;   // top-left at neutral gaze
+  int16_t        x;   // dest top-left of the SCALED bitmap, at neutral gaze
   int16_t        y;
 };
 
+// `scale` lets the same artwork drive screens of different visual sizes:
+// the physical fur-cutout build wants a big eye (overflowing 128x64) while
+// the wokwi preview wants both native eyes on one screen. The renderer
+// scales the bitmap draw + eyelid bbox + pupil drift by this factor, so the
+// motion looks visually proportional on every screen. Non-integer values
+// are fine; clipping past the screen edges is fine (Adafruit_GFX skips them).
 struct Eye {
   EyeBitmap   sclera;
   PupilBitmap pupil;
+  float       scale;  // 1.0 = native art, 2.0 = doubled, etc.
 };
 
 // Render one eye's layers into the current framebuffer. Does NOT clear or
@@ -50,3 +57,10 @@ void renderEye(Adafruit_SSD1306 &d, const Eye &eye, const EyePose &pose);
 void renderEyes(Adafruit_SSD1306 &d,
                 const Eye &left, const Eye &right,
                 const EyePose &pose);
+
+// Render a single eye on its own display: clears + draws + pushes. Use this
+// when each eye lives on a separate physical OLED (e.g. two SSD1306 modules
+// driven by Wire and Wire1, one per screen). Loop becomes:
+//   renderEyeOn(displayL, kLeftEye,  pose);
+//   renderEyeOn(displayR, kRightEye, pose);
+void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyePose &pose);

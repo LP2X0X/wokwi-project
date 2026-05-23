@@ -113,6 +113,10 @@ void renderEyes(Adafruit_SSD1306 &d,
   ::renderEyes(d, left, right, s.pose);
 }
 
+void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s) {
+  ::renderEyeOn(d, eye, s.pose);
+}
+
 void eyeStateSetSleepy(EyeState &s, float target) {
   sleepySet(s.sleepy, target);
 }

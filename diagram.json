@@ -10,15 +10,46 @@
       "left": -100.76,
       "attrs": {}
     },
-    { "type": "board-ssd1306", "id": "oled1", "top": 99.14, "left": 57.83, "attrs": { "i2cAddress": "0x3c" } }
+    {
+      "type": "board-ssd1306",
+      "id": "oled1",
+      "top": 99.14,
+      "left": 57.83,
+      "attrs": { "i2cAddress": "0x3c" }
+    },
+    {
+      "type": "board-ssd1306",
+      "id": "oled2",
+      "top": 99.14,
+      "left": 163.43,
+      "attrs": { "i2cAddress": "0x3c" }
+    },
+    {
+      "type": "board-ssd1306",
+      "id": "oled3",
+      "top": 99.14,
+      "left": 300,
+      "attrs": { "i2cAddress": "0x3d" }
+    }
   ],
   "connections": [
-    [ "esp:TX", "$serialMonitor:RX", "", [] ],
-    [ "esp:RX", "$serialMonitor:TX", "", [] ],
-    [ "oled1:SCL", "esp:1", "green", [ "v0" ] ],
-    [ "oled1:SDA", "esp:2", "blue", [ "v0" ] ],
-    [ "oled1:GND", "esp:GND.2", "black", [ "v0" ] ],
-    [ "oled1:VCC", "esp:3V3.1", "red", [ "v0" ] ]
+    ["esp:TX", "$serialMonitor:RX", "", []],
+    ["esp:RX", "$serialMonitor:TX", "", []],
+
+    ["oled1:SCL", "esp:1", "green", ["v0"]],
+    ["oled1:SDA", "esp:2", "blue", ["v0"]],
+    ["oled1:GND", "esp:GND.2", "black", ["v0"]],
+    ["oled1:VCC", "esp:3V3.1", "red", ["v0"]],
+
+    ["oled2:SCL", "esp:5", "green", ["v0"]],
+    ["oled2:SDA", "esp:6", "blue", ["v0"]],
+    ["oled2:GND", "esp:GND.2", "black", ["v0"]],
+    ["oled2:VCC", "esp:3V3.1", "red", ["v0"]],
+
+    ["oled3:SCL", "esp:1", "green", ["v0"]],
+    ["oled3:SDA", "esp:2", "blue", ["v0"]],
+    ["oled3:GND", "esp:GND.2", "black", ["v0"]],
+    ["oled3:VCC", "esp:3V3.1", "red", ["v0"]]
   ],
   "dependencies": {}
 }

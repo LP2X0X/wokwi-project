@@ -3,7 +3,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#include "assets/eyes_bitmaps.h"
 #include "anim/eye_anim.h"
 
 #define SCREEN_WIDTH   128
@@ -39,71 +38,76 @@ constexpr bool TEST_DISABLE_MICRO_MOTION = false;
 
 // Physical eye scale. The fur-cutout build has eye holes larger than the
 // OLED active area, so we render the eye big enough to overflow the 128×64
-// screen — the visible portion fills the cutout. Tune to taste; 1.0 = native
-// 36×44 sclera (fits comfortably), 2.0 = 72×88 (clips top/bottom by ~12 px
-// each), >2 = more clipping.
+// screen — the visible portion fills the cutout. Multiplies the ANIMATED
+// drift only; the sclera/pupil radii below are absolute pixels.
 constexpr float PHYS_SCALE = 2.0f;
+
+// Physical sclera / pupil radii.
+//   PHYS_SCLERA_R = 72 → diameter 144, overflows the 128-wide screen by 8 px
+//   per side. The fur cutout absorbs the overflow horizontally as well as
+//   vertically, so the visible eye reads as a slice of an even larger ball.
+//   PHYS_PUPIL_R  = 16 → pupil_diameter / sclera_diameter = 1/4.5 (smaller,
+//   more focused pupil than the source artwork's 1/3 — matches the Ghibli
+//   reference better).
+constexpr int16_t PHYS_SCLERA_R = 64;
+constexpr int16_t PHYS_PUPIL_R  = 16;
 
 Adafruit_SSD1306 displayL(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire,  OLED_RESET);
 Adafruit_SSD1306 displayR(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
 Adafruit_SSD1306 displayP(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire,  OLED_RESET);
 bool has_preview = false;
 
-// Helper: dest top-left of a scaled bitmap that should sit at a specific
-// pupil-offset within the scaled sclera, with the sclera itself centered on
-// a 128×64 screen. Keeping these inline keeps the per-eye Eye literal short
-// while preserving the original artwork's slight inward pupil bias (which is
-// part of the susuwatari look).
-constexpr int16_t centeredScleraX(int16_t src_w, float scale) {
-  return (int16_t)((SCREEN_WIDTH  - (int16_t)(src_w * scale)) / 2);
-}
-constexpr int16_t centeredScleraY(int16_t src_h, float scale) {
-  return (int16_t)((SCREEN_HEIGHT - (int16_t)(src_h * scale)) / 2);
-}
-
-// --- Per-physical-eye configs: big, overflowing 128×64 ---
-// Each eye centered on its own screen. Pupil keeps its source-relative
-// offset within the sclera, just scaled.
-constexpr int16_t BIG_L_SX = centeredScleraX(eye_left_white_w,  PHYS_SCALE);
-constexpr int16_t BIG_L_SY = centeredScleraY(eye_left_white_h,  PHYS_SCALE);
-constexpr int16_t BIG_R_SX = centeredScleraX(eye_right_white_w, PHYS_SCALE);
-constexpr int16_t BIG_R_SY = centeredScleraY(eye_right_white_h, PHYS_SCALE);
-
+// --- Per-physical-eye configs: sclera overflows the screen on all sides ---
+// Centered on the screen → the circle overflows by (PHYS_SCLERA_R - 64) px
+// horizontally and (PHYS_SCLERA_R - 32) px vertically (the fur cutout
+// absorbs the overflow). Pupil neutral offset preserves the slight inward
+// bias from the original artwork (±8 source px × PHYS_SCALE = ±16), which
+// is part of the susuwatari look.
 const Eye kBigLeftEye = {
-  { eye_left_white_bmp, eye_left_white_w, eye_left_white_h, BIG_L_SX, BIG_L_SY },
-  { eye_left_pupil_bmp, eye_left_pupil_w, eye_left_pupil_h,
-    (int16_t)(BIG_L_SX + (int16_t)((eye_left_pupil_x - eye_left_white_x) * PHYS_SCALE)),
-    (int16_t)(BIG_L_SY + (int16_t)((eye_left_pupil_y - eye_left_white_y) * PHYS_SCALE)) },
+  /*sclera_cx=*/SCREEN_WIDTH  / 2,
+  /*sclera_cy=*/SCREEN_HEIGHT / 2,
+  /*sclera_r =*/PHYS_SCLERA_R,
+  /*pupil_dx_neutral=*/(int16_t)( 16 * PHYS_SCALE),
+  /*pupil_dy_neutral=*/(int16_t)(-1),
+  /*pupil_r        =*/PHYS_PUPIL_R,
   PHYS_SCALE,
   EyeSide::Left,
 };
 
 const Eye kBigRightEye = {
-  { eye_right_white_bmp, eye_right_white_w, eye_right_white_h, BIG_R_SX, BIG_R_SY },
-  { eye_right_pupil_bmp, eye_right_pupil_w, eye_right_pupil_h,
-    (int16_t)(BIG_R_SX + (int16_t)((eye_right_pupil_x - eye_right_white_x) * PHYS_SCALE)),
-    (int16_t)(BIG_R_SY + (int16_t)((eye_right_pupil_y - eye_right_white_y) * PHYS_SCALE)) },
+  /*sclera_cx=*/SCREEN_WIDTH  / 2,
+  /*sclera_cy=*/SCREEN_HEIGHT / 2,
+  /*sclera_r =*/PHYS_SCLERA_R,
+  /*pupil_dx_neutral=*/(int16_t)(-16 * PHYS_SCALE),
+  /*pupil_dy_neutral=*/0,
+  /*pupil_r        =*/PHYS_PUPIL_R,
   PHYS_SCALE,
   EyeSide::Right,
 };
 
-// --- Preview config: both eyes at native size on one 128×64 screen ---
-// Uses the artwork's original positions — exactly what the bitmaps were
-// authored for. This is the "how do they look together" view in wokwi.
+// --- Preview config: both eyes side-by-side on one 128×64 screen ---
+// Native sizes preserved (sclera_r = 18, pupil_r = 6) so the wokwi preview
+// shows the eyes at their authored proportions. Both eyes have the inward
+// pupil bias (left +8, right -8) just like the physical config — same look,
+// smaller scale.
 const Eye kPreviewLeft = {
-  { eye_left_white_bmp, eye_left_white_w, eye_left_white_h,
-    eye_left_white_x, eye_left_white_y },
-  { eye_left_pupil_bmp, eye_left_pupil_w, eye_left_pupil_h,
-    eye_left_pupil_x, eye_left_pupil_y },
+  /*sclera_cx=*/43,
+  /*sclera_cy=*/31,
+  /*sclera_r =*/18,
+  /*pupil_dx_neutral=*/ 8,
+  /*pupil_dy_neutral=*/ 0,
+  /*pupil_r        =*/ 6,
   1.0f,
   EyeSide::Left,
 };
 
 const Eye kPreviewRight = {
-  { eye_right_white_bmp, eye_right_white_w, eye_right_white_h,
-    eye_right_white_x, eye_right_white_y },
-  { eye_right_pupil_bmp, eye_right_pupil_w, eye_right_pupil_h,
-    eye_right_pupil_x, eye_right_pupil_y },
+  /*sclera_cx=*/87,
+  /*sclera_cy=*/31,
+  /*sclera_r =*/18,
+  /*pupil_dx_neutral=*/-8,
+  /*pupil_dy_neutral=*/ 0,
+  /*pupil_r        =*/ 6,
   1.0f,
   EyeSide::Right,
 };
@@ -143,7 +147,6 @@ void setup() {
   }
 
   eyeStateInit(eyes, millis());
-  eyeTriggerCuriosity(eyes, 0.8f, 1500); // TODO: REMOVE AFTER TEST.
   next_frame_ms = millis();
 }
 

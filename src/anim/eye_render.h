@@ -13,47 +13,43 @@
 
 #include "eye_pose.h"
 
-// Static, build-time eye geometry. One Eye per physical eye.
-//
-// `EyeBitmap` and `PupilBitmap` are typed identically right now, but kept as
-// separate types so it stays obvious which is the sclera (drawn WHITE) and
-// which is the pupil (drawn BLACK to punch a hole). A future `EyeBitmap`
-// might gain things the pupil doesn't need (e.g. a soft-edge mask), so the
-// split costs nothing now and saves a refactor later.
-struct EyeBitmap {
-  const uint8_t *bmp;
-  int16_t        w;   // SOURCE bitmap dims (not scaled)
-  int16_t        h;
-  int16_t        x;   // dest top-left of the SCALED bitmap, in screen coords
-  int16_t        y;
-};
-
-struct PupilBitmap {
-  const uint8_t *bmp;
-  int16_t        w;   // SOURCE bitmap dims (not scaled)
-  int16_t        h;
-  int16_t        x;   // dest top-left of the SCALED bitmap, at neutral gaze
-  int16_t        y;
-};
-
 // Identifies which physical eye this Eye instance represents. The renderer
 // uses it to pick the matching per-eye extras from EyePose (see idle_gaze).
-// Eyes that don't care about asymmetry (e.g. a future single-screen render
-// of just one eye) can pass Left and stay correct — both extras zero out
-// when nobody writes them.
+// Eyes that don't care about asymmetry can pass Left and stay correct —
+// both extras zero out when nobody writes them.
 enum class EyeSide : uint8_t { Left = 0, Right = 1 };
 
-// `scale` lets the same artwork drive screens of different visual sizes:
-// the physical fur-cutout build wants a big eye (overflowing 128x64) while
-// the wokwi preview wants both native eyes on one screen. The renderer
-// scales the bitmap draw + eyelid bbox + pupil drift by this factor, so the
-// motion looks visually proportional on every screen. Non-integer values
-// are fine; clipping past the screen edges is fine (Adafruit_GFX skips them).
+// Static, build-time eye geometry. Both sclera and pupil are procedural
+// circles — no bitmap assets. The sclera circle is allowed to overflow the
+// display (the fur cutout on the physical build absorbs the overflow); the
+// renderer relies on Adafruit_GFX clipping for off-screen pixels.
+//
+// Geometry fields (cx/cy/r, neutral pupil offset) are ABSOLUTE pixels — they
+// already encode the per-display visual size. `scale` is a separate knob
+// that multiplies the ANIMATED pupil drift coming in via EyePose, so motion
+// behaviors authored in "source pixel" units (±1.5 px etc.) read as visually
+// proportional regardless of which display this Eye is bound to.
 struct Eye {
-  EyeBitmap   sclera;
-  PupilBitmap pupil;
-  float       scale;  // 1.0 = native art, 2.0 = doubled, etc.
-  EyeSide     side;   // selects per-eye pose extras at render time
+  // Sclera (white area) as a circle in screen coords. Width of the visible
+  // area is `2 * sclera_r`. Curiosity stretches the circle into an ellipse
+  // VERTICALLY at draw time (pose.eye_open_amount); width never changes.
+  int16_t sclera_cx;
+  int16_t sclera_cy;
+  int16_t sclera_r;
+
+  // Pupil neutral offset from the sclera center, in screen pixels. This is
+  // the "where the iris sits in the artwork" bias — e.g. a slight inward
+  // tilt for the susuwatari look. Animated drift (pose.pupil_dx/dy + per-eye
+  // extras) adds on top of this, multiplied by `scale`.
+  int16_t pupil_dx_neutral;
+  int16_t pupil_dy_neutral;
+  int16_t pupil_r;
+
+  // Per-display zoom for ANIMATION amplitudes only. 1.0 = source units
+  // unchanged, 2.0 = doubled drift range. Geometry radii above are absolute
+  // and are NOT multiplied by this.
+  float   scale;
+  EyeSide side;
 };
 
 // Render one eye's layers into the current framebuffer. Does NOT clear or

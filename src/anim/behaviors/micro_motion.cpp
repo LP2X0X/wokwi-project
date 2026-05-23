@@ -8,10 +8,28 @@ namespace {
 
 // Tunables — kept private to this translation unit so other modules can't
 // silently grow a dependency on them.
-constexpr float    DRIFT_RANGE_PX    = 2.0f;
-constexpr float    DRIFT_TAU_S       = 0.35f;
-constexpr uint16_t DRIFT_HOLD_MIN_MS = 500;
-constexpr uint16_t DRIFT_HOLD_MAX_MS = 1800;
+//
+// FPS-INVARIANT BY DESIGN. All knobs below are in WALL-CLOCK units (seconds
+// and milliseconds). The smoother uses `k = 1 - exp(-dt/tau)`, which is
+// mathematically equivalent over the same wall-clock interval regardless of
+// how `dt` is sliced — so changing FRAME_INTERVAL_MS in main.cpp does NOT
+// change the perceived drift speed. Higher fps only means smoother rendered
+// motion (more sub-pixel dither resolution, no integer-snap stepping); it
+// does not make the eye drift faster.
+//
+// One caveat: `eyeStateUpdate()` clamps `dt` at 0.1 s to bound the smoother
+// during paused tabs / lost frames. If you intentionally drop below ~10 fps
+// the clamp will start to compress motion (the smoother will "fall behind"
+// wall clock). At the supported 50–120 fps range it is never engaged.
+//
+// To slow/speed perceived motion, change THESE values, not FRAME_INTERVAL_MS:
+//   * range  -> drift amplitude in pixels
+//   * tau    -> easing softness in seconds (bigger = slower glide)
+//   * hold   -> wall-clock duration between random target re-rolls
+constexpr float    DRIFT_RANGE_PX    = 1.0f;
+constexpr float    DRIFT_TAU_S       = 0.55f;
+constexpr uint16_t DRIFT_HOLD_MIN_MS = 900;
+constexpr uint16_t DRIFT_HOLD_MAX_MS = 3000;
 
 }  // namespace
 

@@ -36,6 +36,13 @@ struct PupilBitmap {
   int16_t        y;
 };
 
+// Identifies which physical eye this Eye instance represents. The renderer
+// uses it to pick the matching per-eye extras from EyePose (see idle_gaze).
+// Eyes that don't care about asymmetry (e.g. a future single-screen render
+// of just one eye) can pass Left and stay correct — both extras zero out
+// when nobody writes them.
+enum class EyeSide : uint8_t { Left = 0, Right = 1 };
+
 // `scale` lets the same artwork drive screens of different visual sizes:
 // the physical fur-cutout build wants a big eye (overflowing 128x64) while
 // the wokwi preview wants both native eyes on one screen. The renderer
@@ -46,6 +53,7 @@ struct Eye {
   EyeBitmap   sclera;
   PupilBitmap pupil;
   float       scale;  // 1.0 = native art, 2.0 = doubled, etc.
+  EyeSide     side;   // selects per-eye pose extras at render time
 };
 
 // Render one eye's layers into the current framebuffer. Does NOT clear or

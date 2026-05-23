@@ -49,6 +49,19 @@
 struct EyePose {
   float pupil_dx;          // pixels, additive offset from neutral pupil pos
   float pupil_dy;          // pixels
+  // Per-eye additive offsets on top of pupil_dx/dy. Idle gaze writes here to
+  // inject tiny natural asymmetry — both eyes share the same chosen target,
+  // but each side has its own smoothing tau and a small target jitter, so
+  // during transitions the pupils arrive at slightly different times. At
+  // rest, both extras converge to the same point.
+  //
+  // Renderer selects which extra to apply based on `Eye::side`. Behaviors
+  // that don't care about asymmetry (e.g. micro motion) keep writing to
+  // pupil_dx/dy as before.
+  float pupil_dx_l_extra;
+  float pupil_dy_l_extra;
+  float pupil_dx_r_extra;
+  float pupil_dy_r_extra;
   float pupil_scale;       // 1.0 = neutral; future: surprise/dilation scale
   float upper_lid_amount;  // 0..1, fraction of eye height covered from top
   float lower_lid_amount;  // 0..1, fraction of eye height covered from bot

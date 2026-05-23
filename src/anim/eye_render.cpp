@@ -108,10 +108,18 @@ void renderEye(Adafruit_SSD1306 &d, const Eye &eye, const EyePose &pose) {
                    scale, SSD1306_WHITE);
 
   // 2. Pupil — drawn in BLACK so it punches a hole through the sclera.
-  //    Pose carries the composed offset in NATIVE pixels; scale it so the
-  //    visual amplitude of drift is the same on every screen.
-  const int16_t px = eye.pupil.x + (int16_t)lroundf(pose.pupil_dx * scale);
-  const int16_t py = eye.pupil.y + (int16_t)lroundf(pose.pupil_dy * scale);
+  //    Pose carries the composed offset in NATIVE pixels; scale + per-eye
+  //    extras (idle gaze asymmetry) compose the intent, which is rounded
+  //    to the nearest integer screen pixel. Sub-pixel motion is lost on
+  //    1bpp OLEDs — a temporal-dither attempt strobed static fractional
+  //    intents (e.g. sleepy y-bias) as visible vertical shimmer, so we
+  //    keep the simpler integer snap.
+  const float extra_x = (eye.side == EyeSide::Left)
+      ? pose.pupil_dx_l_extra : pose.pupil_dx_r_extra;
+  const float extra_y = (eye.side == EyeSide::Left)
+      ? pose.pupil_dy_l_extra : pose.pupil_dy_r_extra;
+  const int16_t px = eye.pupil.x + (int16_t)lroundf((pose.pupil_dx + extra_x) * scale);
+  const int16_t py = eye.pupil.y + (int16_t)lroundf((pose.pupil_dy + extra_y) * scale);
   drawBitmapScaled(d, px, py, eye.pupil.bmp, eye.pupil.w, eye.pupil.h,
                    scale, SSD1306_BLACK);
 

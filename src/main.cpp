@@ -23,13 +23,19 @@
 #define RIGHT_SCL_PIN  5
 #define SCREEN_ADDRESS_PREVIEW 0x3D
 
-// ~50 fps. The SSD1306 over I2C tops out around there; lower it if you want
-// to free CPU for sensors/wifi later.
-constexpr uint16_t FRAME_INTERVAL_MS = 20;
+// ~60 fps — matches the SSD1306's ~62 Hz internal refresh. Lower if you
+// want to free CPU for sensors/wifi later.
+constexpr uint16_t FRAME_INTERVAL_MS = 16;
 
 // TEST: pin sleepy_amount to 1.0 every frame to see the maximum droop.
 // Set to false to restore the autonomous mood drift.
 constexpr bool TEST_PIN_MAX_SLEEPY = false;
+
+// TEST: cancel micro motion's contribution to the pose so only idle gaze
+// drives the pupil position — useful for tuning the gaze behavior in
+// isolation. Sleepy y-bias and idle gaze (per-eye extras) still apply.
+// Set to false to restore the always-on micro drift.
+constexpr bool TEST_DISABLE_MICRO_MOTION = false;
 
 // Physical eye scale. The fur-cutout build has eye holes larger than the
 // OLED active area, so we render the eye big enough to overflow the 128×64
@@ -69,6 +75,7 @@ const Eye kBigLeftEye = {
     (int16_t)(BIG_L_SX + (int16_t)((eye_left_pupil_x - eye_left_white_x) * PHYS_SCALE)),
     (int16_t)(BIG_L_SY + (int16_t)((eye_left_pupil_y - eye_left_white_y) * PHYS_SCALE)) },
   PHYS_SCALE,
+  EyeSide::Left,
 };
 
 const Eye kBigRightEye = {
@@ -77,6 +84,7 @@ const Eye kBigRightEye = {
     (int16_t)(BIG_R_SX + (int16_t)((eye_right_pupil_x - eye_right_white_x) * PHYS_SCALE)),
     (int16_t)(BIG_R_SY + (int16_t)((eye_right_pupil_y - eye_right_white_y) * PHYS_SCALE)) },
   PHYS_SCALE,
+  EyeSide::Right,
 };
 
 // --- Preview config: both eyes at native size on one 128×64 screen ---
@@ -88,6 +96,7 @@ const Eye kPreviewLeft = {
   { eye_left_pupil_bmp, eye_left_pupil_w, eye_left_pupil_h,
     eye_left_pupil_x, eye_left_pupil_y },
   1.0f,
+  EyeSide::Left,
 };
 
 const Eye kPreviewRight = {
@@ -96,6 +105,7 @@ const Eye kPreviewRight = {
   { eye_right_pupil_bmp, eye_right_pupil_w, eye_right_pupil_h,
     eye_right_pupil_x, eye_right_pupil_y },
   1.0f,
+  EyeSide::Right,
 };
 
 EyeState eyes;
@@ -107,6 +117,14 @@ void setup() {
   // Two independent I2C buses, one per display.
   Wire.begin (LEFT_SDA_PIN,  LEFT_SCL_PIN);
   Wire1.begin(RIGHT_SDA_PIN, RIGHT_SCL_PIN);
+
+  // Default Wire clock is 100 kHz — at ~92 ms per 1 KB SSD1306 frame that
+  // drops us to ~3–4 fps with three displays and makes the L/R update gap
+  // visible. 1 MHz is well within SSD1306 module tolerance and brings us
+  // back to the targeted ~50 fps. Drop to 400 000 if you ever see corruption
+  // on long wires / cheap modules on real hardware.
+  Wire.setClock (1000000);
+  Wire1.setClock(1000000);
 
   if (!displayL.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println("Left SSD1306 allocation failed");
@@ -145,6 +163,16 @@ void loop() {
   // even noisy detections turn into organic eye follow.
 
   eyeStateUpdate(eyes, now);
+
+  // Cancel micro motion's contribution AFTER composePose has run, so the
+  // micro_motion state itself still evolves (cheap, and lets us flip the
+  // flag back to false without any other side effects). Idle gaze writes
+  // its contribution into the per-eye `*_extra` fields, which we leave
+  // untouched — those are what the renderer adds at draw time.
+  if (TEST_DISABLE_MICRO_MOTION) {
+    eyes.pose.pupil_dx -= eyes.micro.drift_x;
+    eyes.pose.pupil_dy -= eyes.micro.drift_y;
+  }
 
   // Both eyes share one EyePose (binocular pair: shared drift, shared
   // blink), but they render in two different geometries:

@@ -46,6 +46,7 @@
 #include "behaviors/micro_motion.h"
 #include "behaviors/blink.h"
 #include "behaviors/sleepy.h"
+#include "behaviors/idle_gaze.h"
 
 // Container of every behavior's private state plus the composed pose.
 // Behaviors only ever touch THEIR sub-struct; the orchestrator (eye_anim.cpp)
@@ -54,6 +55,7 @@ struct EyeState {
   MicroMotionState micro;
   BlinkState       blink;
   SleepyState      sleepy;
+  IdleGazeState    idle_gaze;
 
   // External gaze input (face detector, IMU, scripted scenes). Set via the
   // eyeSetGazeTarget() / eyeClearGazeTarget() helpers. Defaults to inactive
@@ -81,9 +83,9 @@ void renderEyes(Adafruit_SSD1306 &d,
                 const Eye &left, const Eye &right,
                 const EyeState &s);
 
-// Render a single eye on its own display. Convenience overload of
-// renderEyeOn(d, eye, pose) that pulls the pose out of EyeState. Use when
-// each eye lives on its own physical OLED:
+// Render a single eye on its own display. Convenience overload that pulls
+// the pose out of EyeState. Use when each eye lives on its own physical
+// OLED:
 //   renderEyeOn(displayL, kLeftEye,  eyes);
 //   renderEyeOn(displayR, kRightEye, eyes);
 void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s);

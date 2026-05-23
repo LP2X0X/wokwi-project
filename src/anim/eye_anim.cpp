@@ -29,6 +29,15 @@ void composePose(const EyeState &s, const Modulators &mods, EyePose &out) {
   out.pupil_dy    = s.micro.drift_y + mods.pupil_y_bias_px;
   out.pupil_scale = mods.pupil_scale_mult;
 
+  // Idle gaze contributes a SEPARATE per-eye offset so the renderer can
+  // give each side a slightly different position during a glance (tiny
+  // asymmetry → reads as alive). At rest, both eyes' extras converge to the
+  // same point and there's no visible asymmetry.
+  out.pupil_dx_l_extra = s.idle_gaze.gx_l;
+  out.pupil_dy_l_extra = s.idle_gaze.gy_l;
+  out.pupil_dx_r_extra = s.idle_gaze.gx_r;
+  out.pupil_dy_r_extra = s.idle_gaze.gy_r;
+
   // Lid amounts in dimensionless [0..1]. Renderer scales by per-eye height
   // so the same pose draws on any-sized eye / asymmetric eyes / future
   // per-eye poses (wink etc.) cleanly.
@@ -56,9 +65,10 @@ void composePose(const EyeState &s, const Modulators &mods, EyePose &out) {
 void eyeStateInit(EyeState &s, uint32_t now_ms) {
   randomSeed(esp_random());
 
-  microMotionInit(s.micro,  now_ms);
-  blinkInit      (s.blink,  now_ms);
-  sleepyInit     (s.sleepy, now_ms);
+  microMotionInit(s.micro,     now_ms);
+  blinkInit      (s.blink,     now_ms);
+  sleepyInit     (s.sleepy,    now_ms);
+  idleGazeInit   (s.idle_gaze, now_ms);
 
   s.gaze = GazeIntent{false, 0.0f, 0.0f, 0.0f};
 
@@ -100,8 +110,9 @@ void eyeStateUpdate(EyeState &s, uint32_t now_ms) {
   //   happyModulate   (s.happy,    mods);
 
   // Pass 3: motion behaviors consume modulators + gaze.
-  microMotionUpdate(s.micro, mods, s.gaze, now_ms, dt);
-  blinkUpdate      (s.blink, mods, now_ms);
+  microMotionUpdate(s.micro,     mods, s.gaze, now_ms, dt);
+  blinkUpdate      (s.blink,     mods, now_ms);
+  idleGazeUpdate   (s.idle_gaze, mods, s.gaze, now_ms, dt);
 
   // Pass 4: build the pose for this frame.
   composePose(s, mods, s.pose);

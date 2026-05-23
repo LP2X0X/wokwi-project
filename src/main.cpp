@@ -63,11 +63,16 @@ void loop() {
   if ((int32_t)(now - next_frame_ms) < 0) return;
   next_frame_ms = now + FRAME_INTERVAL_MS;
 
-  // Pinning every frame so the autonomous re-roll inside updateSleepyState()
+  // Pinning every frame so the autonomous re-roll inside sleepyUpdate()
   // can't overwrite the test value 8–25 s in.
   if (TEST_PIN_MAX_SLEEPY) {
     eyeStateSetSleepy(eyes, 1.0f);
   }
+
+  // Future gaze-tracking integration would call:
+  //   eyeSetGazeTarget(eyes, face_dx_px, face_dy_px, /*weight=*/1.0f);
+  // every frame from a face detector. Micro motion smooths the signal, so
+  // even noisy detections turn into organic eye follow.
 
   eyeStateUpdate(eyes, now);
   renderEyes(display, kLeftEye, kRightEye, eyes);

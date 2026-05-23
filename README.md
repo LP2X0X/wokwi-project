@@ -17,7 +17,14 @@ tools/
 src/
   main.cpp                     # setup + frame-paced loop driving the anim
   anim/
-    eye_anim.h / .cpp          # procedural animation system
+    eye_anim.h / .cpp          # public API + composePose orchestrator
+    eye_pose.h                 # data contracts: EyePose, Modulators, GazeIntent
+    eye_render.h / .cpp        # pure (Eye, EyePose) -> pixels renderer
+    anim_util.h                # shared math helpers (smoothstep, lerp, RNG)
+    behaviors/
+      micro_motion.h / .cpp    # pupil drift + gaze blending
+      blink.h / .cpp           # blink schedule + lid_close
+      sleepy.h / .cpp          # sleepy emotion -> Modulators
   assets/
     eyes_bitmaps.h             # auto-generated 1bpp Adafruit_GFX bitmaps
 docs/
@@ -129,29 +136,34 @@ exactly 128×64.
 
 ## Procedural animation system
 
-The animation pipeline lives in `src/anim/eye_anim.{h,cpp}`. It's
-parameter-driven (no frame sheets), runs a full redraw per frame, and is
-built around one rule:
+The animation pipeline lives in `src/anim/`. It's parameter-driven (no
+frame sheets), runs a full redraw per frame, and is built around one rule:
 
-> **Behaviors are independent layers that all write into one `EyeState`.
-> Rendering is a pure function of that state plus the static `Eye`
-> descriptors.**
+> **Emotions write into a shared `Modulators` bus; motion behaviors read it
+> and update their own state. `composePose()` assembles a final `EyePose`.
+> Rendering is a pure function of `(Eye geometry, EyePose)`.**
 
-Currently implemented behavior layers:
+Currently implemented:
 
 - **Micro motion** — pupils drift continuously toward random targets with
-  exponential easing. Never stops.
+  exponential easing. Optionally blends with an external `GazeIntent` so
+  face-tracking signals arrive as smooth eye follow.
 - **Blinking** — non-periodic, three-phase asymmetric `smoothstep` with
-  occasional double blinks.
-- **Sleepy mode** — a single 0..1 scalar that other layers read as a
-  multiplier. Drives lid droop, pupil sink, slower drift, longer blinks,
-  and occasional long sleepy blinks. Autonomous mood drift over 8–25 s
-  cycles.
+  occasional double blinks. Hold can be extended via emotion modulators
+  ("long sleepy blink").
+- **Sleepy mode** — a single 0..1 scalar that writes into `Modulators`.
+  Drives lid droop, pupil sink, slower drift, longer blinks, and
+  occasional long sleepy blinks. Autonomous mood drift over 8–25 s cycles.
 - **Curved eyelids** — two procedural parabolic arcs (upper + lower) with
   spherical perspective: ∩ above the eye center, flat at center, ∪ below.
 
-For data model, math, blending rules, tuning knobs, and how to add new
-behaviors (look-at, wink, curiosity, emotions, face tracking), see:
+The architecture is built for extension. Adding a new emotion (surprise,
+happy, sad, …) means dropping a new file under `behaviors/` with the same
+shape as `sleepy` — no existing behavior changes. Face-tracking, wink, and
+scripted scenes are explicit recipes in the guide.
+
+For data model, math, blending rules, tuning knobs, and the full
+extensibility playbook, see:
 
 → **[docs/ANIMATION.md](docs/ANIMATION.md)** — the full animation guide.
 

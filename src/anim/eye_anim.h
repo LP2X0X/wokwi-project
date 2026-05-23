@@ -1,121 +1,101 @@
-// Procedural eye animation for a binocular pair on a 1bpp SSD1306.
+// Top-level public API for the procedural eye animation system.
 //
-// Design contract:
-//   * Behaviors are independent layers. Each updateXxx() reads time and writes
-//     into EyeState. They never read each other. Adding sleepy/curiosity/etc.
-//     later means adding another updateXxx() that pokes the same fields.
-//   * Rendering is a pure function of EyeState + the static Eye descriptors.
-//   * Pupils are dynamic offsets, eyelids are procedural rectangle masks.
-//     No pre-baked frames anywhere.
+// This header is intentionally small. It is the ONLY header `main.cpp` (or
+// any future app code) needs to include for routine use:
 //
-// Frame composition:
-//     1. clear
-//     2. draw sclera bitmap (WHITE)
-//     3. draw pupil bitmap with (drift_x, drift_y) offset (BLACK = hole)
-//     4. draw the upper eyelid as a procedural curved arc per column (BLACK)
-//        descending from above. Curvature follows spherical perspective:
-//          centerline above eye center -> arc bows UP (∩)
-//          centerline at eye center    -> flat line
-//          centerline below eye center -> arc bows DOWN (∪)
-//     5. draw the lower eyelid the same way but rising from below, with
-//        smaller travel (real eyes blink mostly with the upper lid).
-//     6. push to display
+//   #include "anim/eye_anim.h"
 //
-// Pixels outside the eye silhouette are no-ops because painting BLACK on an
-// already-off pixel doesn't change anything — the lid shape gets clipped to
-// the eye automatically.
+//   EyeState eyes;
+//   eyeStateInit(eyes, millis());
 //
-// Eyes are treated as a binocular pair (shared drift, shared blink) because
-// that's what reads as "alive" — independent eyes look broken.
+//   // every frame:
+//   eyeStateUpdate(eyes, millis());
+//   renderEyes(display, kLeftEye, kRightEye, eyes);
+//
+// Architecture in one paragraph:
+//   * `EyeState` is a *bag of behavior states* (micro motion, blink, sleepy,
+//     gaze) plus a single composed `EyePose`. Each behavior owns its own
+//     fields in its own header — this struct just hosts them so the app
+//     side has a single value to pass around.
+//   * `eyeStateUpdate()` runs a fixed pipeline every frame:
+//       1. Emotions update their internal scalars.
+//       2. Emotions write into a fresh `Modulators`.
+//       3. Motion behaviors (drift, blink) update, reading Modulators + Gaze.
+//       4. composePose() reads behavior states + Modulators -> EyePose.
+//   * Renderer is a pure function of (Eye geometry, EyePose). It cannot
+//     observe sleepiness, blink phase, or any other internal state — only
+//     the composed pose.
+//
+// Adding a new emotion (surprise, happy, sad, ...): drop a new file under
+// `behaviors/`, give it `xxxState` + `xxxUpdate` + `xxxModulate`, add a
+// member to `EyeState`, and call them in eye_anim.cpp's update pipeline.
+// Existing behaviors do not change.
+//
+// Adding a new motion behavior (look-at, micro-saccades, ...): drop another
+// behavior file, have it read `Modulators` + `GazeIntent` + its own state,
+// and either write directly into the pose during composePose() or into a
+// new BehaviorState that composePose pulls from.
 
 #pragma once
 
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
 
-// Static, build-time eye geometry. One Eye per physical eye.
-struct EyeBitmap {
-  const uint8_t *bmp;
-  int16_t        w;
-  int16_t        h;
-  int16_t        x;   // top-left in screen coords (sclera position)
-  int16_t        y;
-};
+#include "eye_pose.h"
+#include "eye_render.h"
+#include "behaviors/micro_motion.h"
+#include "behaviors/blink.h"
+#include "behaviors/sleepy.h"
 
-struct PupilBitmap {
-  const uint8_t *bmp;
-  int16_t        w;
-  int16_t        h;
-  int16_t        x;   // top-left at neutral gaze
-  int16_t        y;
-};
-
-struct Eye {
-  EyeBitmap   sclera;
-  PupilBitmap pupil;
-  // The eyelid layer is procedural (computed from sclera geometry + a global
-  // curvature constant), so it doesn't carry its own bitmap. Add a per-eye
-  // `float lid_curve` here later if you want asymmetric expressions.
-};
-
-// Live, per-frame state. Behaviors mutate this; render reads it.
+// Container of every behavior's private state plus the composed pose.
+// Behaviors only ever touch THEIR sub-struct; the orchestrator (eye_anim.cpp)
+// is the only thing that touches the whole EyeState.
 struct EyeState {
-  // ---- micro motion (shared across both eyes) ----
-  float    drift_x;          // current pupil offset, pixels (smoothed)
-  float    drift_y;
-  float    drift_tx;         // current target the drift is easing toward
-  float    drift_ty;
-  uint32_t drift_next_ms;    // when to pick a new target
+  MicroMotionState micro;
+  BlinkState       blink;
+  SleepyState      sleepy;
 
-  // ---- blink ----
-  float    lid_close;        // 0 = open, 1 = fully closed (smooth, procedural)
-  uint32_t blink_next_ms;    // scheduled start of next blink (when idle)
-  uint32_t blink_start_ms;   // 0 if no blink in flight
-  uint16_t blink_close_ms;   // closing phase length (set per-blink)
-  uint16_t blink_hold_ms;    // fully-closed hold
-  uint16_t blink_open_ms;    // opening phase length
-  bool     double_pending;   // queued second blink right after this one
+  // External gaze input (face detector, IMU, scripted scenes). Set via the
+  // eyeSetGazeTarget() / eyeClearGazeTarget() helpers. Defaults to inactive
+  // so existing setups behave identically to before.
+  GazeIntent       gaze;
 
-  // ---- sleepy mode ----
-  // A single 0..1 scalar that other layers READ as a multiplier — they never
-  // branch on it. At sleepy_amount = 0 the animation is identical to fully
-  // awake. Effects ramp in continuously as it grows: lids droop, pupil sinks,
-  // drift slows, blinks lengthen, occasional long sleepy blinks appear.
-  float    sleepy_amount;    // current, smoothed (0..1)
-  float    sleepy_target;    // currently easing toward this (0..1)
-  uint32_t sleepy_next_ms;   // when to autonomously re-roll sleepy_target
+  // Composed output from the last eyeStateUpdate(). The renderer reads this
+  // (and only this) when drawing.
+  EyePose          pose;
 
-  // ---- bookkeeping ----
-  uint32_t last_update_ms;
+  uint32_t         last_update_ms;
 };
 
-// Seed RNG, zero state, schedule the first blink.
+// Seed RNG, zero state, schedule the first blink + sleepy mood roll.
 void eyeStateInit(EyeState &s, uint32_t now_ms);
 
-// Per-frame entrypoint. Computes dt internally and runs the behavior layers.
+// Per-frame entrypoint. Computes dt, runs the behavior pipeline, composes
+// the final pose. Renderer reads `s.pose` afterwards.
 void eyeStateUpdate(EyeState &s, uint32_t now_ms);
 
-// Individual behavior layers — public so you can compose your own update()
-// (e.g. skip blink while showing an emotion, or layer a "look at" override
-// before micro motion). They read each other's outputs through EyeState only;
-// order matters: sleepy first (it parameters drift + blink), then drift, then
-// blink.
-void updateSleepyState(EyeState &s, uint32_t now_ms, float dt);
-void updateMicroMotion(EyeState &s, uint32_t now_ms, float dt);
-void updateBlink(EyeState &s, uint32_t now_ms);
-
-// External hook: nudge sleepy_target (e.g. from a light sensor or time of
-// day). The autonomous re-roll inside updateSleepyState() will eventually
-// overwrite this — call it on each tick if you want it to "stick", or call it
-// once and let the autonomous behavior take over.
-void eyeStateSetSleepy(EyeState &s, float target);
-
-// Renders both eyes. Does clearDisplay() and display() itself so callers don't
-// have to know about the layer order.
+// Renders both eyes from `s.pose`. Convenience that hides EyePose from
+// callers that just want to draw and forget. Internally calls
+// renderEyes(d, l, r, s.pose).
 void renderEyes(Adafruit_SSD1306 &d,
                 const Eye &left, const Eye &right,
                 const EyeState &s);
 
-// Lower-level: render one eye's layers into the current framebuffer without
-// clearing or pushing. Useful when composing more elements on the screen.
-void renderEye(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s);
+// External hook: nudge the sleepy target (e.g. from a light sensor or time
+// of day). The autonomous re-roll inside sleepyUpdate() will eventually
+// overwrite this — call once for "stay sleepy a while", or every frame to
+// pin it to a sensor value.
+void eyeStateSetSleepy(EyeState &s, float target);
+
+// External gaze input. `target_x`/`target_y` are pupil-offset pixels
+// (same units as drift). `weight` blends with random drift:
+//   0.0 = ignored (pure micro motion), 1.0 = drift fully tracks gaze.
+// Call from a face-tracking loop every frame; smoothing inside micro_motion
+// turns even a noisy detection signal into organic eye follow.
+void eyeSetGazeTarget(EyeState &s,
+                      float target_x, float target_y, float weight = 1.0f);
+
+// Stop applying any gaze input. Equivalent to setting weight = 0 but also
+// flips the active flag, so other behaviors (debug/UX) can know the system
+// is back in pure-autonomous mode.
+void eyeClearGazeTarget(EyeState &s);

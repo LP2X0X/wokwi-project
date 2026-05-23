@@ -68,6 +68,7 @@ void eyeStateInit(EyeState &s, uint32_t now_ms) {
   microMotionInit(s.micro,     now_ms);
   blinkInit      (s.blink,     now_ms);
   sleepyInit     (s.sleepy,    now_ms);
+  curiosityInit  (s.curiosity, now_ms);
   idleGazeInit   (s.idle_gaze, now_ms);
 
   s.gaze = GazeIntent{false, 0.0f, 0.0f, 0.0f};
@@ -97,17 +98,17 @@ void eyeStateUpdate(EyeState &s, uint32_t now_ms) {
   // only coupling, which keeps the system a DAG — no cycles, no surprises.
 
   // Pass 1: emotion updates.
-  sleepyUpdate(s.sleepy, now_ms, dt);
+  sleepyUpdate   (s.sleepy,    now_ms, dt);
+  curiosityUpdate(s.curiosity, now_ms, dt);
   // Add new emotions here:
-  //   surpriseUpdate(s.surprise, now_ms, dt);
-  //   happyUpdate   (s.happy,    now_ms, dt);
+  //   happyUpdate(s.happy, now_ms, dt);
 
   // Pass 2: build the modulator stack.
   Modulators mods = Modulators::neutral();
-  sleepyModulate(s.sleepy, mods);
+  sleepyModulate   (s.sleepy,    mods);
+  curiosityModulate(s.curiosity, mods);
   // Add new emotions here:
-  //   surpriseModulate(s.surprise, mods);
-  //   happyModulate   (s.happy,    mods);
+  //   happyModulate(s.happy, mods);
 
   // Pass 3: motion behaviors consume modulators + gaze.
   microMotionUpdate(s.micro,     mods, s.gaze, now_ms, dt);
@@ -130,6 +131,10 @@ void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s) {
 
 void eyeStateSetSleepy(EyeState &s, float target) {
   sleepySet(s.sleepy, target);
+}
+
+void eyeTriggerCuriosity(EyeState &s, float intensity, uint32_t duration_ms) {
+  curiosityTrigger(s.curiosity, intensity, duration_ms, millis());
 }
 
 void eyeSetGazeTarget(EyeState &s,

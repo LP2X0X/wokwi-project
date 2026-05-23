@@ -143,6 +143,7 @@ void setup() {
   }
 
   eyeStateInit(eyes, millis());
+  eyeTriggerCuriosity(eyes, 0.8f, 1500); // TODO: REMOVE AFTER TEST.
   next_frame_ms = millis();
 }
 

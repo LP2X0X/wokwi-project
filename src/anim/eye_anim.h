@@ -46,6 +46,7 @@
 #include "behaviors/micro_motion.h"
 #include "behaviors/blink.h"
 #include "behaviors/sleepy.h"
+#include "behaviors/curiosity.h"
 #include "behaviors/idle_gaze.h"
 
 // Container of every behavior's private state plus the composed pose.
@@ -55,6 +56,7 @@ struct EyeState {
   MicroMotionState micro;
   BlinkState       blink;
   SleepyState      sleepy;
+  CuriosityState   curiosity;
   IdleGazeState    idle_gaze;
 
   // External gaze input (face detector, IMU, scripted scenes). Set via the
@@ -95,6 +97,19 @@ void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s);
 // overwrite this — call once for "stay sleepy a while", or every frame to
 // pin it to a sensor value.
 void eyeStateSetSleepy(EyeState &s, float target);
+
+// External event hook: fire the wide-eye curiosity expression. Designed
+// for sensor / scripted-scene activation:
+//   * Finger snap detected      -> eyeTriggerCuriosity(eyes, 0.9f, 1200);
+//   * Face just appeared        -> eyeTriggerCuriosity(eyes, 0.7f, 2000);
+//   * Light touch on a sensor   -> eyeTriggerCuriosity(eyes, 0.6f, 1500);
+//
+// `intensity` ∈ [0, 1] scales eye-widening, pupil-shrink, gaze focus, and
+// motion energy. `duration_ms` is how long to hold before the soft decay
+// starts. Re-callable any time — the smoother just retargets, no hard
+// switching, fully interruptible / restartable. Calling with intensity = 0
+// just lets the current activation decay early.
+void eyeTriggerCuriosity(EyeState &s, float intensity, uint32_t duration_ms);
 
 // External gaze input. `target_x`/`target_y` are pupil-offset pixels
 // (same units as drift). `weight` blends with random drift:

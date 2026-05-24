@@ -101,6 +101,14 @@ struct Modulators {
   uint16_t long_blink_extra_min_ms;
   uint16_t long_blink_extra_max_ms;
 
+  // Soft blink suppression. Emotions add positive contributions; the blink
+  // behavior treats this as a gate — when the running total exceeds ~0.3
+  // it defers any blink that would start (pushes blink_next_ms forward a
+  // few hundred ms and re-checks). When the total falls back below the
+  // threshold blinks resume on their normal schedule, so this is a "delay
+  // while attentive" rather than a hard veto.
+  float blink_inhibit;
+
   // Master eye-open additive contribution (forward-compat, currently
   // composePose just propagates into pose.eye_open_amount = 1 + this).
   float eye_open_add;
@@ -121,6 +129,7 @@ struct Modulators {
     m.long_blink_chance        = 0.0f;
     m.long_blink_extra_min_ms  = 0;
     m.long_blink_extra_max_ms  = 0;
+    m.blink_inhibit            = 0.0f;
     m.eye_open_add             = 0.0f;
     return m;
   }

@@ -47,6 +47,7 @@ src/anim/
   behaviors/
     sleepy.h / .cpp       # mood scalar -> Modulators (an "emotion")
     curiosity.h / .cpp    # wide-eye attention -> Modulators (an "emotion")
+    attentive.h / .cpp    # "huh?" listening reaction -> Modulators (an "emotion")
     blink.h / .cpp        # blink schedule + lid_close (a "motion")
     micro_motion.h / .cpp # pupil jitter + gaze blending (a "motion")
     idle_gaze.h / .cpp    # autonomous "looking around" glances (a "motion")
@@ -93,6 +94,7 @@ struct Modulators {
   float    long_blink_chance;      // 0..1 probability per blink
   uint16_t long_blink_extra_min_ms;
   uint16_t long_blink_extra_max_ms;
+  float    blink_inhibit;          // soft blink gate (attentive listening, ...)
   float    eye_open_add;           // additive on eye_open_amount baseline
 
   static Modulators neutral();     // every multiplier 1, every offset 0
@@ -158,6 +160,22 @@ struct IdleGazeState {
   float    tx_l, ty_l, tx_r, ty_r;
   float    tau_l, tau_r;
 };
+
+// behaviors/attentive.h
+struct AttentiveState {
+  enum Phase : uint8_t { Idle, Freeze, Glance, Hold, Verify, Relax };
+  Phase    phase;
+  uint32_t phase_until_ms;         // when current phase ends
+  uint32_t end_ms;                 // when to drop into Relax mid-phase
+  bool     verify_done;            // we only do ONE verify per activation
+  float    amount, target_amount;  // smoothed scalar drives modulators
+  float    dir_x, dir_y;           // commanded direction (pixels)
+  // Smoothed shared pupil offset, read directly by composePose() and added
+  // to pose.pupil_dx/dy. Same pattern as idle_gaze's per-eye extras — the
+  // Modulators bus is for INFLUENCE, this is direct spatial output.
+  float    gaze_x,  gaze_y;
+  float    gaze_tx, gaze_ty;
+};
 ```
 
 ### Container (eye_anim.h)
@@ -169,6 +187,7 @@ struct EyeState {
   SleepyState      sleepy;
   CuriosityState   curiosity;
   IdleGazeState    idle_gaze;
+  AttentiveState   attentive;
   GazeIntent       gaze;
   EyePose          pose;           // composed output of last update
   uint32_t         last_update_ms;
@@ -188,12 +207,14 @@ eyeStateUpdate(now):
     # Pass 1: emotions update internal scalars.
     sleepyUpdate   (s.sleepy,    now, dt)
     curiosityUpdate(s.curiosity, now, dt)
+    attentiveUpdate(s.attentive, now, dt)
     # happyUpdate(s.happy, now, dt)         # future
 
     # Pass 2: emotions write into a fresh Modulators bus.
     mods = Modulators::neutral()
     sleepyModulate   (s.sleepy,    mods)
     curiosityModulate(s.curiosity, mods)
+    attentiveModulate(s.attentive, mods)
     # happyModulate(s.happy, mods)          # future
 
     # Pass 3: motion behaviors consume modulators + gaze.
@@ -215,9 +236,11 @@ The single function that assembles the final pose:
 
 ```cpp
 void composePose(const EyeState &s, const Modulators &mods, EyePose &out) {
-  // Shared pupil offset (both eyes follow this)
-  out.pupil_dx    = s.micro.drift_x;
-  out.pupil_dy    = s.micro.drift_y + mods.pupil_y_bias_px;
+  // Shared pupil offset (both eyes follow this). Attentive contributes a
+  // smoothed directional offset; per-eye asymmetry still comes from
+  // idle_gaze extras below.
+  out.pupil_dx    = s.micro.drift_x + s.attentive.gaze_x;
+  out.pupil_dy    = s.micro.drift_y + mods.pupil_y_bias_px + s.attentive.gaze_y;
   out.pupil_scale = mods.pupil_scale_mult;
 
   // Per-eye additive offsets — idle gaze writes these to inject subtle
@@ -296,6 +319,13 @@ probability `mods.long_blink_chance`, an extra
 `urand(long_blink_extra_min_ms, long_blink_extra_max_ms)` is added to
 `blink_hold_ms`. Awake stack has chance == 0; sleepy contributes
 `amount · 30%` and a 300–900 ms range.
+
+**Soft blink inhibit** — when `mods.blink_inhibit > 0.3` (attentive
+listening, future "focused stare" emotions, ...), a queued blink defers
+itself by 500 ms and re-checks instead of firing. When the inhibit fades
+to below the threshold, blinks resume on their normal schedule — so this
+is a "pause and resume" rather than a hard veto. The first blink lands
+within ~500 ms of the inhibit dropping.
 
 ### Idle gaze (motion behavior)
 
@@ -473,6 +503,105 @@ amount
   Drift hold stacks (sleepy ×2.5 × curious ×2.5 = 6.25× baseline) so the
   combo reads as "drowsy but suddenly attentive on something."
 
+### Attentive / Listening (emotion behavior)
+
+A "huh? did I hear something?" reaction. Externally triggered (sound,
+touch, face appearance, finger snap) with a direction toward the
+suspected source. The eyes run a small phase sequence —
+**freeze → glance → hold → verify → relax** — while writing modulator
+contributions for eye widening, pupil shrink, lid retract, drift focus,
+and soft blink suppression.
+
+Unlike sleepy / curiosity, attentive has **no autonomous trigger** —
+curiosity already handles spontaneous noticing, and tying attentive to a
+timer would just compete for the same animation slot. Attentive is
+purely sensor-driven.
+
+**Phase sequence** (typical 1.5–2 s activation):
+
+| phase  | typical duration | gaze target                     | what reads on screen          |
+|--------|------------------|---------------------------------|-------------------------------|
+| Freeze | 80–180 ms        | 0 (no movement)                 | brief pause — "what was that?" |
+| Glance | 180–280 ms       | direction (full)                | snappy dart toward source     |
+| Hold   | remainder        | direction (full)                | listening — wider, focused    |
+| Verify | 220–360 ms       | direction × 0.55 + ≤ 1.4 px jitter | tiny double-check glance     |
+| Hold   | until end_ms     | direction (full)                | resumes listening             |
+| Relax  | 500–750 ms       | 0 (eases back)                  | settles to baseline           |
+
+Verify fires automatically once per activation, scheduled randomly
+within the first half of the hold. It's skipped on activations too short
+to fit a clean verify cycle (< ~600 ms of hold remaining).
+
+**External trigger:**
+
+```cpp
+void eyeTriggerAttentive(EyeState &s,
+                         float intensity, uint32_t duration_ms,
+                         float direction_x, float direction_y);
+
+// Typical wiring:
+if (mic_right_peak)         eyeTriggerAttentive(eyes, 0.7f, 1800,  1.0f, 0.0f);
+if (touch_top_of_head)      eyeTriggerAttentive(eyes, 0.6f, 1500,  0.0f,-1.0f);
+if (face_just_appeared)     eyeTriggerAttentive(eyes, 0.5f, 2000,  0.0f, 0.0f);
+if (finger_snap_detected)   eyeTriggerAttentive(eyes, 0.9f, 1200,  0.7f,-0.3f);
+```
+
+`direction_x` / `direction_y` are normalized `[-1, +1]` (negative = left
+/ up, positive = right / down). Scaled internally to **±5 px horizontal,
+±3 px vertical** — real eye movement is more horizontal than vertical so
+a "look down" reaction is more subtle than a "look right." Intensity
+scales the FACIAL expression only; the gaze movement is full-magnitude
+even at low intensity (a quiet listening read still snaps the pupils
+toward the source).
+
+Re-callable mid-sequence: the smoother retargets without re-doing the
+freeze beat, so a burst of close-together sound events reads as ONE
+sustained listening moment rather than several twitches.
+
+**Smoothing:**
+
+- `amount` uses asymmetric tau — `TAU_IN_S = 0.12 s` (fast attack, "huh?"
+  reads instantly), `TAU_OUT_S = 0.40 s` (soft release, relaxes rather
+  than snaps back).
+- Gaze offset uses two phase-dependent taus —
+  `TAU_GAZE_SNAP_S = 0.08 s` during Glance / Verify (animal-quick darts),
+  `TAU_GAZE_HOLD_S = 0.30 s` during Hold (steady, settled).
+
+**What attentive contributes to Modulators** (linear in `amount`, no-op at 0):
+
+| Modulator field             | Contribution at full attentive                                    |
+|-----------------------------|-------------------------------------------------------------------|
+| `eye_open_add` (+=)         | `+ a · 0.20` — eyes slightly wider                                |
+| `pupil_scale_mult` (×=)     | `× (1 − a · 0.18)` — slightly smaller pupil                       |
+| `lid_upper_droop` (-=)      | `− a · 0.15` — small lid retract (cancels mild sleepy droop)      |
+| `drift_range_mult` (×=)     | `× (1 − a · 0.60)` — narrower wandering (focused listening)       |
+| `drift_tau_mult` (×=)       | `× (1 + a · 0.20)` — drift slightly smoother                      |
+| `drift_hold_mult` (×=)      | `× (1 + a · 1.50)` — long holds on target                         |
+| `blink_inhibit` (+=)        | `+ a · 1.00` — soft blink gate (see Blink section)                |
+
+**Gaze offset (not via Modulators)** — attentive writes its smoothed
+directional output (`s.attentive.gaze_x` / `gaze_y`) directly into
+`composePose()`'s pupil offset. The Modulators bus is for INFLUENCE on
+existing knobs; spatial state goes through state structs the way
+idle_gaze does for per-eye extras.
+
+**Composition with other behaviors:**
+
+- `sleepy + attentive` — `lid_upper_droop` is additive, so attentive's
+  `−0.15` first cancels mild sleepy droop and then pushes the lid
+  slightly open. Reads as "drowsy creature suddenly alert at something."
+- `curiosity + attentive` — both contribute to widening / pupil shrink /
+  drift focus; meant for "noticed AND attentive" moments triggered
+  together. Lid retract sums cleanly (curiosity `−0.30` + attentive
+  `−0.15` = `−0.45`); the `composePose()` clamp keeps it sane.
+- `idle_gaze` — keeps running; its drift_range × 0.4 and drift_hold ×
+  2.5 effectively pin its wandering. Per-eye extras still apply so the
+  pupils have tiny independent asymmetry even during the listening hold.
+- `micro_motion` — same treatment; wobble narrows but never freezes,
+  reading as "alive but holding still."
+- `blink` — soft-gated by `blink_inhibit` (described in the Blink
+  section).
+
 ### Gaze input (external)
 
 Not a behavior — just a struct populated from outside. The micro motion
@@ -491,7 +620,54 @@ math above). Use `0.5` for "gaze-biased wander" or `1.0` for "lock onto
 the face but stay smooth". Even a noisy detection signal turns into
 organic eye follow because micro motion's smoother runs unchanged.
 
-## Render pipeline
+## Eye shapes & render pipeline
+
+### Eye geometry (procedural circles, no bitmaps)
+
+The sclera and pupil are both **procedural circles** — no sprite assets,
+no bitmap files. Each Eye describes its geometry in absolute screen
+pixels:
+
+```cpp
+struct Eye {
+  // Sclera (white area) as a circle. Curiosity stretches it vertically
+  // into an ellipse at draw time; width never changes.
+  int16_t sclera_cx, sclera_cy;
+  int16_t sclera_r;
+
+  // Pupil neutral offset from sclera center (the "iris sits here" bias —
+  // e.g. slight inward tilt for the susuwatari look). Animated drift
+  // adds on top of this, multiplied by `scale`.
+  int16_t pupil_dx_neutral;
+  int16_t pupil_dy_neutral;
+  int16_t pupil_r;
+
+  // Animation amplitude multiplier (NOT applied to radii). 1.0 = source
+  // units, 2.0 = doubled drift range. Lets behaviors stay tuned in
+  // "source pixel" units while different displays render at different
+  // visual sizes.
+  float   scale;
+  EyeSide side;       // Left / Right — picks per-eye pose extras at draw
+};
+```
+
+The fur-cutout build wires two physical OLEDs (one eye each) with a
+sclera radius larger than the screen — the circle deliberately overflows
+the panel, and the cutout in the fur absorbs the overflow so the visible
+portion fills the eye hole. The wokwi preview screen shows both eyes at
+native size on one panel.
+
+In `main.cpp`:
+
+```cpp
+// Physical: sclera overflows the screen by (R − 64) px horizontally and
+// (R − 32) px vertically.
+constexpr int16_t PHYS_SCLERA_R = 72;        // diameter 144 — fills + spills
+constexpr int16_t PHYS_PUPIL_R  = 16;        // ratio ≈ 1/4.5 of sclera diameter
+constexpr float   PHYS_SCALE    = 2.0f;      // doubles ANIMATION amplitude only
+```
+
+### Render pipeline
 
 ```
 renderEyes(d, left, right, pose):
@@ -501,34 +677,52 @@ renderEyes(d, left, right, pose):
     display()
 
 renderEye(d, eye, pose):
-    # Three independent scale knobs sit on top of Eye::scale (per-display zoom):
-    #   sclera_scale_x = eye.scale                       # width unchanged
-    #   sclera_scale_y = eye.scale * pose.eye_open_amount  # Y-only stretch
-    #   pupil_scale    = eye.scale * pose.pupil_scale     # uniform pupil scale
-    # All scales centered on the BASELINE anchor (so stretching grows
-    # symmetrically around the original eye center, not from the top-left).
-    drawBitmapScaled(sclera, sclera_scale_x, sclera_scale_y, WHITE)        # 1
+    # Three scale knobs sit on top of the static circle geometry:
+    #   pose.eye_open_amount → stretches sclera HEIGHT only (curiosity peak
+    #                          ~2.0 = ellipse). Width never changes.
+    #   pose.pupil_scale     → uniform multiplier on the pupil radius.
+    #   eye.scale            → per-display zoom for the ANIMATED drift only.
+    sclera_rx = eye.sclera_r
+    sclera_ry = eye.sclera_r * pose.eye_open_amount
 
-    # Pick per-eye additive offset based on Eye::side, add to shared pose.pupil_d*
+    fillEllipse(d, eye.sclera_cx, eye.sclera_cy,
+                sclera_rx, sclera_ry, WHITE)                            # 1
+
+    # Pupil position: sclera center + neutral offset + scaled drift.
+    # Pick per-eye additive offset based on Eye::side.
     extra_x = (eye.side == Left) ? pose.pupil_dx_l_extra : pose.pupil_dx_r_extra
-    extra_y = ...same for y...
-    drawBitmapScaled(pupil at (pupil.x + (pose.pupil_dx + extra_x)*eye.scale,
-                               pupil.y + (pose.pupil_dy + extra_y)*eye.scale),
-                     pupil_scale, pupil_scale, BLACK)                      # 2 (hole)
+    extra_y = (eye.side == Left) ? pose.pupil_dy_l_extra : pose.pupil_dy_r_extra
+    pupil_cx = eye.sclera_cx + eye.pupil_dx_neutral
+               + (pose.pupil_dx + extra_x) * eye.scale
+    pupil_cy = eye.sclera_cy + eye.pupil_dy_neutral
+               + (pose.pupil_dy + extra_y) * eye.scale
+    pupil_r  = eye.pupil_r * pose.pupil_scale
+    fillCircle(d, pupil_cx, pupil_cy, pupil_r, BLACK)                   # 2 (hole)
 
-    # Eyelid bbox follows the STRETCHED sclera so a taller eye gets a taller lid travel.
-    upper_y = sclera.y + pose.upper_lid_amount * stretched_h
-    lower_y = sclera.y + stretched_h - pose.lower_lid_amount * stretched_h
-    drawCurvedLid(eye, upper_y, curvature, fill_from_top=true)             # 3
-    drawCurvedLid(eye, lower_y, curvature, fill_from_top=false)            # 4
+    # Eyelid bbox follows the (possibly stretched) sclera ellipse. We
+    # use 2*r + 1 (NOT 2*r) so the loop covers the inclusive [-r, +r]
+    # range that fillCircle / fillEllipse paint — otherwise a 1-px
+    # sliver of sclera stays visible at the lateral edges during a full
+    # blink (the parabolic bow goes to 0 at xn = ±1).
+    bbox_w = 2 * sclera_rx + 1
+    bbox_h = 2 * sclera_ry + 1
+    drawCurvedLid(d, bbox, upper_lid_y, curvature, fill_from_top=true)  # 3
+    drawCurvedLid(d, bbox, lower_lid_y, curvature, fill_from_top=false) # 4
 ```
 
-`Eye::side` (`Left` / `Right`) decides which `pupil_d*_extra` the renderer
-reads — this is how the same `EyePose` produces visibly different positions
-on the two physical OLEDs.
+`fillEllipse` is a scanline implementation built on top of
+`drawFastHLine`; when `rx == ry` it dispatches to `Adafruit_GFX::fillCircle`
+which uses the midpoint algorithm and is faster. Off-screen pixels clip
+silently so circles that overflow the panel work without any explicit
+bounds checks.
 
-The renderer cannot observe `lid_close`, `sleepy_amount`, drift state, or
-any other behavior internal — only the composed pose. Replacing the
+`Eye::side` (`Left` / `Right`) decides which `pupil_d*_extra` the
+renderer reads — this is how the same `EyePose` produces visibly
+different positions on the two physical OLEDs (idle gaze's per-eye
+asymmetry).
+
+The renderer cannot observe `lid_close`, `sleepy_amount`, drift state,
+or any other behavior internal — only the composed pose. Replacing the
 renderer (LCD with grayscale, host-side simulator) means re-implementing
 this one function; behaviors don't change.
 
@@ -537,10 +731,10 @@ this one function; behaviors don't change.
 Both lids share one helper (`drawCurvedLid`) and one perspective rule:
 
 ```
-bow_curvature = (lid_centerline_y − eye_center_y) / (sclera.h / 2)
+bow_curvature = (lid_centerline_y − eye_center_y) / sclera_ry
 y_lid(x)      = lid_centerline_y + bow_curvature · max_dip · (1 − x_norm²)
-where x_norm  = (x − eye_center_x) / (sclera.w / 2)   ∈ [-1, +1]
-      max_dip = sclera.h · LID_CURVE_FRACTION
+where x_norm  = (x − eye_center_x) / sclera_rx   ∈ [-1, +1]
+      max_dip = 2 · sclera_ry · LID_CURVE_FRACTION
 ```
 
 The sign of `bow_curvature`:
@@ -577,7 +771,11 @@ anonymous namespace. Open the file you want to tune:
 | `behaviors/blink.cpp`                    | `BLINK_GAP_*`, `BLINK_CLOSE/HOLD/OPEN_MS`, `DOUBLE_BLINK_PCT`, `DOUBLE_GAP_*` |
 | `behaviors/blink.h`                      | `LOWER_LID_TRAVEL_FRACTION`                        |
 | `behaviors/sleepy.cpp`                   | `SLEEPY_*` (tau, hold, droop fractions, drift mults, blink mult, long-blink) |
+| `behaviors/curiosity.cpp`                | `TAU_IN/OUT_S`, `EYE_OPEN_BOOST`, `PUPIL_SHRINK`, `LID_UPPER/LOWER_RETRACT`, `DRIFT_*` |
+| `behaviors/idle_gaze.cpp`                | `SMALL/MEDIUM/LARGE_RANGE_PX`, `HOLD_*`, `MOVE_*`, `TAU_MIN/MAX_S`, `ASYMMETRY_*` |
+| `behaviors/attentive.cpp`                | `TAU_*_S`, `FREEZE/GLANCE/VERIFY/RELAX_*_MS`, `DIR_RANGE_PX_*`, `EYE_OPEN_BOOST`, `PUPIL_SHRINK`, `DRIFT_*`, `BLINK_INHIBIT_AT_PEAK` |
 | `eye_render.cpp`                         | `LID_CURVE_FRACTION` (rendering knob)              |
+| `main.cpp`                               | `PHYS_SCLERA_R`, `PHYS_PUPIL_R`, `PHYS_SCALE` (physical eye geometry) |
 
 Defaults:
 
@@ -601,6 +799,12 @@ Defaults:
 | `SLEEPY_DRIFT_HOLD_MULT`        | 1.5          | Drift hold extension at full sleepy.                                                                                 |
 | `SLEEPY_BLINK_DURATION_MULT`    | 1.5          | Blink slowdown at full sleepy.                                                                                       |
 | `SLEEPY_LONG_BLINK_PCT_AT_FULL` | 30           | Max % chance per blink of an extra-long sleepy hold.                                                                 |
+| `PHYS_SCLERA_R`                 | 72           | Physical sclera radius — diameter 144 px overflows the 128×64 screen by 8 px per side (fur cutout absorbs the rest). |
+| `PHYS_PUPIL_R`                  | 16           | Physical pupil radius. Ratio `PHYS_PUPIL_R / PHYS_SCLERA_R ≈ 1/4.5` matches the Ghibli-reference pupil size.          |
+| Attentive `TAU_IN/OUT_S`        | 0.12 / 0.40  | Asymmetric tau on `amount` — snappy "huh?" attack, soft release.                                                     |
+| Attentive `TAU_GAZE_SNAP_S`     | 0.08         | Gaze tau during Glance / Verify (animal-quick darts).                                                                |
+| Attentive `TAU_GAZE_HOLD_S`     | 0.30         | Gaze tau during Hold (settled).                                                                                       |
+| Attentive `DIR_RANGE_PX_X/Y`    | 5.0 / 3.0    | Pixel range of the directional pupil offset (horizontal > vertical, like real eyes).                                  |
 
 ## Extending it
 
@@ -676,10 +880,10 @@ pure micro motion.
 | Behavior       | Pattern                                                                                                                                           |
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
 | Wink           | Per-eye pose. Add `EyePose poseL, poseR` to `EyeState`, have `composePose()` write both, add a `WinkState` that biases one side.                  |
-| Curiosity      | Emotion. Lower drift hold, raise drift range, slight upward `pupil_y_bias_px`. Same template as sleepy.                                           |
-| Surprise       | Emotion. `pupil_scale_mult`, `eye_open_add`, briefly snap-faster blinks. Triggered by event with quick decay.                                     |
+| Surprise       | Emotion. `pupil_scale_mult` (dilation), `eye_open_add` (wider), snap-faster blinks via `blink_duration_mult < 1`. Quicker decay than curiosity.   |
+| Sad / scared   | Emotion. Inverse of curiosity for lids (additive droop), pair with a downward `pupil_y_bias_px`. Triggered or autonomous.                         |
 | Per-eye droop  | Move `SLEEPY_*_FRACTION` constants onto `Eye`, sleepy reads them. Or split sleepy into per-eye amounts.                                           |
-| Scripted scene | Build a tiny scenario sequencer that calls `eyeStateSetSleepy` / `eyeSetGazeTarget` / future emotion triggers on a timeline. Behaviors don't care. |
+| Scripted scene | Build a tiny scenario sequencer that calls `eyeStateSetSleepy` / `eyeTriggerCuriosity` / `eyeTriggerAttentive` / `eyeSetGazeTarget` on a timeline. |
 
 ## Dev / test tips
 

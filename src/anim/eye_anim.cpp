@@ -23,10 +23,11 @@ void composePose(const EyeState &s, const Modulators &mods, EyePose &out) {
   using namespace anim_util;
 
   // Pupil position: drift carries the live offset, emotion adds y bias.
-  // Pupil scale is the modulator stack's multiplier (1.0 today; future
-  // surprise/dilation lands here without touching anything else).
-  out.pupil_dx    = s.micro.drift_x;
-  out.pupil_dy    = s.micro.drift_y + mods.pupil_y_bias_px;
+  // Attentive contributes a shared directional offset (both eyes look at
+  // the source; per-eye asymmetry still comes from idle_gaze extras below).
+  // Pupil scale is the modulator stack's multiplier.
+  out.pupil_dx    = s.micro.drift_x + s.attentive.gaze_x;
+  out.pupil_dy    = s.micro.drift_y + mods.pupil_y_bias_px + s.attentive.gaze_y;
   out.pupil_scale = mods.pupil_scale_mult;
 
   // Idle gaze contributes a SEPARATE per-eye offset so the renderer can
@@ -70,6 +71,7 @@ void eyeStateInit(EyeState &s, uint32_t now_ms) {
   sleepyInit     (s.sleepy,    now_ms);
   curiosityInit  (s.curiosity, now_ms);
   idleGazeInit   (s.idle_gaze, now_ms);
+  attentiveInit  (s.attentive, now_ms);
 
   s.gaze = GazeIntent{false, 0.0f, 0.0f, 0.0f};
 
@@ -100,6 +102,7 @@ void eyeStateUpdate(EyeState &s, uint32_t now_ms) {
   // Pass 1: emotion updates.
   sleepyUpdate   (s.sleepy,    now_ms, dt);
   curiosityUpdate(s.curiosity, now_ms, dt);
+  attentiveUpdate(s.attentive, now_ms, dt);
   // Add new emotions here:
   //   happyUpdate(s.happy, now_ms, dt);
 
@@ -107,6 +110,7 @@ void eyeStateUpdate(EyeState &s, uint32_t now_ms) {
   Modulators mods = Modulators::neutral();
   sleepyModulate   (s.sleepy,    mods);
   curiosityModulate(s.curiosity, mods);
+  attentiveModulate(s.attentive, mods);
   // Add new emotions here:
   //   happyModulate(s.happy, mods);
 
@@ -135,6 +139,13 @@ void eyeStateSetSleepy(EyeState &s, float target) {
 
 void eyeTriggerCuriosity(EyeState &s, float intensity, uint32_t duration_ms) {
   curiosityTrigger(s.curiosity, intensity, duration_ms, millis());
+}
+
+void eyeTriggerAttentive(EyeState &s,
+                         float intensity, uint32_t duration_ms,
+                         float direction_x, float direction_y) {
+  attentiveTrigger(s.attentive, intensity, duration_ms,
+                   direction_x, direction_y, millis());
 }
 
 void eyeSetGazeTarget(EyeState &s,

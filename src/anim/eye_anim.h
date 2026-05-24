@@ -48,6 +48,7 @@
 #include "behaviors/sleepy.h"
 #include "behaviors/curiosity.h"
 #include "behaviors/idle_gaze.h"
+#include "behaviors/attentive.h"
 
 // Container of every behavior's private state plus the composed pose.
 // Behaviors only ever touch THEIR sub-struct; the orchestrator (eye_anim.cpp)
@@ -58,6 +59,7 @@ struct EyeState {
   SleepyState      sleepy;
   CuriosityState   curiosity;
   IdleGazeState    idle_gaze;
+  AttentiveState   attentive;
 
   // External gaze input (face detector, IMU, scripted scenes). Set via the
   // eyeSetGazeTarget() / eyeClearGazeTarget() helpers. Defaults to inactive
@@ -110,6 +112,29 @@ void eyeStateSetSleepy(EyeState &s, float target);
 // switching, fully interruptible / restartable. Calling with intensity = 0
 // just lets the current activation decay early.
 void eyeTriggerCuriosity(EyeState &s, float intensity, uint32_t duration_ms);
+
+// External event hook: fire the attentive / listening expression with a
+// direction toward the suspected source. Designed for sensor / scripted
+// activation:
+//   * Sound peak in the right mic   -> eyeTriggerAttentive(eyes, 0.7f, 1800,  1.0f, 0.0f);
+//   * Touch on top of head          -> eyeTriggerAttentive(eyes, 0.6f, 1500,  0.0f,-1.0f);
+//   * Face just appeared in front   -> eyeTriggerAttentive(eyes, 0.5f, 2000,  0.0f, 0.0f);
+//
+//   intensity   ∈ [0, 1]   how alert the expression reads. Does NOT scale
+//                          the gaze movement itself — even a calm trigger
+//                          still snaps the pupils toward the source.
+//   duration_ms            how long to stay attentive before the soft
+//                          relax. Internal freeze / glance / hold /
+//                          verify timings sit inside this window.
+//   direction_x ∈ [-1, 1]  -1 = look left, +1 = look right
+//   direction_y ∈ [-1, 1]  -1 = look up,   +1 = look down
+//
+// Re-callable mid-sequence: the smoother retargets to the new direction
+// without re-doing the freeze beat, so a burst of close-together sound
+// events reads as one sustained "listening" rather than separate twitches.
+void eyeTriggerAttentive(EyeState &s,
+                         float intensity, uint32_t duration_ms,
+                         float direction_x, float direction_y);
 
 // External gaze input. `target_x`/`target_y` are pupil-offset pixels
 // (same units as drift). `weight` blends with random drift:

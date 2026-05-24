@@ -56,7 +56,16 @@ void blinkUpdate(BlinkState &s, const Modulators &mods, uint32_t now_ms) {
   //    once here, scaled by the emotion modulator. Sampling at start (not
   //    every frame) means a single blink keeps consistent timing even if
   //    sleepy_amount changes during it.
-  if (s.blink_start_ms == 0 && (int32_t)(now_ms - s.blink_next_ms) >= 0) {
+  //
+  //    Soft inhibit: if an emotion (attentive listening, etc.) is currently
+  //    vetoing blinks, defer this attempt by a short re-check window
+  //    instead of starting. When the inhibit fades the next attempt within
+  //    ~500 ms goes through, so blinks "pause and resume" rather than fire
+  //    at the wrong moment.
+  if (s.blink_start_ms == 0 && (int32_t)(now_ms - s.blink_next_ms) >= 0 &&
+      mods.blink_inhibit > 0.3f) {
+    s.blink_next_ms = now_ms + 500;
+  } else if (s.blink_start_ms == 0 && (int32_t)(now_ms - s.blink_next_ms) >= 0) {
     s.blink_start_ms = now_ms;
 
     const float dur_mult = mods.blink_duration_mult;

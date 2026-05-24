@@ -13,7 +13,7 @@
     {
       "type": "wokwi-ili9341",
       "id": "tft_p",
-      "top": 60,
+      "top": -260,
       "left": 700,
       "attrs": {}
     }

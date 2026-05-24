@@ -67,13 +67,36 @@ constexpr uint16_t COLOR_BG     = TFT_BLACK;
 constexpr uint16_t COLOR_SCLERA = TFT_WHITE;
 constexpr uint16_t COLOR_PUPIL  = TFT_BLACK;
 
-bool g_ab_skip_lids = false;
-bool g_ab_skip_fill = false;
+constexpr int16_t BOUNDS_MARGIN = 1;
+
+inline int16_t clampCoord(int32_t v, int16_t lo, int16_t hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return (int16_t)v;
+}
+
+inline bool rectValid(const SpriteRect &r) {
+  return r.w > 0 && r.h > 0;
+}
+
+SpriteRect clipRect(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+                    int16_t clip_w, int16_t clip_h) {
+  if (x0 > x1 || y0 > y1) return {0, 0, 0, 0};
+
+  x0 = clampCoord(x0, 0, (int16_t)(clip_w - 1));
+  y0 = clampCoord(y0, 0, (int16_t)(clip_h - 1));
+  x1 = clampCoord(x1, 0, (int16_t)(clip_w - 1));
+  y1 = clampCoord(y1, 0, (int16_t)(clip_h - 1));
+
+  return {
+    x0,
+    y0,
+    (int16_t)(x1 - x0 + 1),
+    (int16_t)(y1 - y0 + 1),
+  };
+}
 
 }  // namespace
-
-void renderAbSetSkipLids(bool skip) { g_ab_skip_lids = skip; }
-void renderAbSetSkipFill(bool skip) { g_ab_skip_fill = skip; }
 
 void renderEye(TFT_eSprite &spr, const Eye &eye, const EyePose &pose) {
   // Scale knobs on top of the static geometry:
@@ -122,24 +145,22 @@ void renderEye(TFT_eSprite &spr, const Eye &eye, const EyePose &pose) {
   const float upper_off = pose.upper_lid_amount * (float)bbox_h;
   const float lower_off = pose.lower_lid_amount * (float)bbox_h;
 
-  if (!g_ab_skip_lids) {
-    if (upper_off > 0.0f) {
-      const float upper_y = (float)bbox_y + upper_off;
-      drawCurvedLid(spr, bbox_x, bbox_y, bbox_w, bbox_h,
-                    upper_y, (upper_y - lid_cy) / lid_b,
-                    /*fill_from_top=*/true, COLOR_BG);
-    }
-    if (lower_off > 0.0f) {
-      const float lower_y = (float)bbox_y + (float)bbox_h - lower_off;
-      drawCurvedLid(spr, bbox_x, bbox_y, bbox_w, bbox_h,
-                    lower_y, (lower_y - lid_cy) / lid_b,
-                    /*fill_from_top=*/false, COLOR_BG);
-    }
+  if (upper_off > 0.0f) {
+    const float upper_y = (float)bbox_y + upper_off;
+    drawCurvedLid(spr, bbox_x, bbox_y, bbox_w, bbox_h,
+                  upper_y, (upper_y - lid_cy) / lid_b,
+                  /*fill_from_top=*/true, COLOR_BG);
+  }
+  if (lower_off > 0.0f) {
+    const float lower_y = (float)bbox_y + (float)bbox_h - lower_off;
+    drawCurvedLid(spr, bbox_x, bbox_y, bbox_w, bbox_h,
+                  lower_y, (lower_y - lid_cy) / lid_b,
+                  /*fill_from_top=*/false, COLOR_BG);
   }
 }
 
 void renderEyeOn(TFT_eSprite &spr, const Eye &eye, const EyePose &pose) {
-  if (!g_ab_skip_fill) spr.fillSprite(COLOR_BG);
+  spr.fillSprite(COLOR_BG);
   renderEye(spr, eye, pose);
   // Caller pushes the sprite to whichever physical display they want by
   // asserting that display's CS pin around spr.pushSprite(0, 0).
@@ -148,8 +169,61 @@ void renderEyeOn(TFT_eSprite &spr, const Eye &eye, const EyePose &pose) {
 void renderEyes(TFT_eSprite &spr,
                 const Eye &left, const Eye &right,
                 const EyePose &pose) {
-  if (!g_ab_skip_fill) spr.fillSprite(COLOR_BG);
+  spr.fillSprite(COLOR_BG);
   renderEye(spr, left,  pose);
   renderEye(spr, right, pose);
   // Caller pushes the sprite. See renderEyeOn().
+}
+
+SpriteRect eyeBounds(const Eye &eye, const EyePose &pose,
+                     int16_t clip_w, int16_t clip_h) {
+  const float open_amt  = pose.eye_open_amount > 0.0f ? pose.eye_open_amount : 1.0f;
+  const float pupil_amt = pose.pupil_scale     > 0.0f ? pose.pupil_scale     : 1.0f;
+
+  const int16_t sclera_rx = eye.sclera_r;
+  const int16_t sclera_ry = (int16_t)lroundf((float)eye.sclera_r * open_amt);
+
+  const float extra_x = (eye.side == EyeSide::Left)
+      ? pose.pupil_dx_l_extra : pose.pupil_dx_r_extra;
+  const float extra_y = (eye.side == EyeSide::Left)
+      ? pose.pupil_dy_l_extra : pose.pupil_dy_r_extra;
+  const int16_t pupil_cx = eye.sclera_cx + eye.pupil_dx_neutral +
+                           (int16_t)lroundf((pose.pupil_dx + extra_x) * eye.scale);
+  const int16_t pupil_cy = eye.sclera_cy + eye.pupil_dy_neutral +
+                           (int16_t)lroundf((pose.pupil_dy + extra_y) * eye.scale);
+  const int16_t pupil_r  = (int16_t)lroundf((float)eye.pupil_r * pupil_amt);
+
+  int16_t x0 = (int16_t)(eye.sclera_cx - sclera_rx - BOUNDS_MARGIN);
+  int16_t y0 = (int16_t)(eye.sclera_cy - sclera_ry - BOUNDS_MARGIN);
+  int16_t x1 = (int16_t)(eye.sclera_cx + sclera_rx + BOUNDS_MARGIN);
+  int16_t y1 = (int16_t)(eye.sclera_cy + sclera_ry + BOUNDS_MARGIN);
+
+  if (pupil_r > 0) {
+    x0 = (int16_t)min((int32_t)x0, (int32_t)(pupil_cx - pupil_r - BOUNDS_MARGIN));
+    y0 = (int16_t)min((int32_t)y0, (int32_t)(pupil_cy - pupil_r - BOUNDS_MARGIN));
+    x1 = (int16_t)max((int32_t)x1, (int32_t)(pupil_cx + pupil_r + BOUNDS_MARGIN));
+    y1 = (int16_t)max((int32_t)y1, (int32_t)(pupil_cy + pupil_r + BOUNDS_MARGIN));
+  }
+
+  return clipRect(x0, y0, x1, y1, clip_w, clip_h);
+}
+
+SpriteRect boundsUnion(const SpriteRect &a, const SpriteRect &b) {
+  if (!rectValid(a)) return b;
+  if (!rectValid(b)) return a;
+
+  const int16_t x0 = (int16_t)min((int32_t)a.x, (int32_t)b.x);
+  const int16_t y0 = (int16_t)min((int32_t)a.y, (int32_t)b.y);
+  const int16_t x1 = (int16_t)max((int32_t)(a.x + a.w - 1), (int32_t)(b.x + b.w - 1));
+  const int16_t y1 = (int16_t)max((int32_t)(a.y + a.h - 1), (int32_t)(b.y + b.h - 1));
+
+  return {x0, y0, (int16_t)(x1 - x0 + 1), (int16_t)(y1 - y0 + 1)};
+}
+
+SpriteRect previewPushBounds(const Eye &left, const Eye &right,
+                             const EyePose &pose,
+                             int16_t clip_w, int16_t clip_h) {
+  return boundsUnion(
+      eyeBounds(left, pose, clip_w, clip_h),
+      eyeBounds(right, pose, clip_w, clip_h));
 }

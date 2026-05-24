@@ -57,6 +57,11 @@ constexpr bool ENABLE_LEFT_DISPLAY    = false;  // re-enable on real hw
 constexpr bool ENABLE_RIGHT_DISPLAY   = false;  // re-enable on real hw
 constexpr bool ENABLE_PREVIEW_DISPLAY = true;
 
+// Preview-only: push the union of both eye bboxes instead of the full
+// 240×240 sprite (~37% less SPI data on preview). Physical eyes clip to
+// the full sprite anyway, so left/right keep full pushSprite().
+constexpr bool ENABLE_PREVIEW_DIRTY_PUSH = true;
+
 // Per-frame heartbeat (rich state dump every 250 ms). USEFUL FOR DEBUG,
 // EXPENSIVE: Serial output on Wokwi's simulated UART can drain slowly
 // and dominate per-loop time. Off by default; flip true to inspect
@@ -67,12 +72,6 @@ constexpr bool ENABLE_HEARTBEAT       = false;
 // Always on so we can confirm the loop is healthy and see whether
 // other changes (sprite size, SPI speed, display count) actually help.
 constexpr bool ENABLE_FPS_COUNTER     = true;
-
-// A/B perf sweep — cycles through render/push isolation modes every 5 s
-// so one Wokwi run captures baseline vs no-push vs no-lids vs no-fill.
-// Flip false when done profiling.
-constexpr bool TEST_AB_CYCLE          = true;
-constexpr uint32_t TEST_AB_INTERVAL_MS = 5000;
 
 // Physical sclera / pupil radii on the 240×240 panel.
 //   PHYS_SCLERA_R = 135 → diameter 270, overflows the 240-wide screen by
@@ -118,60 +117,35 @@ const Eye kBigRightEye = {
 };
 
 // --- Preview config: both eyes side-by-side on one 240×240 screen ---
-// Sclera radius scaled down so two eyes fit horizontally. PREVIEW_SCALE
-// (= 1.5) multiplies the source drift to keep motion visually
-// proportional on the smaller-per-eye preview.
-constexpr float PREVIEW_SCALE = 1.5f;
+// Half-size vs the previous preview (r=50) to cut render + dirty-push
+// cost in Wokwi. PREVIEW_SCALE multiplies source drift so motion still
+// reads proportionally at this smaller geometry.
+constexpr float PREVIEW_SCALE = 0.75f;
 
 const Eye kPreviewLeft = {
-  /*sclera_cx=*/64,
+  /*sclera_cx=*/88,
   /*sclera_cy=*/120,
-  /*sclera_r =*/50,
-  /*pupil_dx_neutral=*/12,
+  /*sclera_r =*/25,
+  /*pupil_dx_neutral=*/6,
   /*pupil_dy_neutral=*/ 0,
-  /*pupil_r        =*/11,
+  /*pupil_r        =*/6,
   PREVIEW_SCALE,
   EyeSide::Left,
 };
 
 const Eye kPreviewRight = {
-  /*sclera_cx=*/176,
+  /*sclera_cx=*/152,
   /*sclera_cy=*/120,
-  /*sclera_r =*/50,
-  /*pupil_dx_neutral=*/-12,
+  /*sclera_r =*/25,
+  /*pupil_dx_neutral=*/-6,
   /*pupil_dy_neutral=*/ 0,
-  /*pupil_r        =*/11,
+  /*pupil_r        =*/6,
   PREVIEW_SCALE,
   EyeSide::Right,
 };
 
 EyeState eyes;
 uint32_t next_frame_ms = 0;
-
-enum class AbMode : uint8_t {
-  Baseline = 0,
-  NoPush,
-  NoLids,
-  NoFill,
-  Count,
-};
-
-inline const char *abModeName(AbMode mode) {
-  switch (mode) {
-    case AbMode::Baseline: return "baseline";
-    case AbMode::NoPush:   return "no_push";
-    case AbMode::NoLids:   return "no_lids";
-    case AbMode::NoFill:   return "no_fill";
-    case AbMode::Count:    return "?";
-  }
-  return "?";
-}
-
-void applyAbMode(AbMode mode, bool &skip_push) {
-  skip_push = (mode == AbMode::NoPush);
-  renderAbSetSkipLids(mode == AbMode::NoLids);
-  renderAbSetSkipFill(mode == AbMode::NoFill);
-}
 
 // Assert one display's CS LOW (and all others HIGH) so the next SPI
 // transaction lands on that display only. The shared MOSI/SCLK/DC/RST
@@ -186,6 +160,29 @@ inline void deselectAllDisplays() {
   digitalWrite(CS_LEFT,    HIGH);
   digitalWrite(CS_RIGHT,   HIGH);
   digitalWrite(CS_PREVIEW, HIGH);
+}
+
+// Push only the preview eye region to the panel. Falls back to a full
+// sprite push when dirty-rect is disabled or bounds cover ≥95% of pixels.
+void pushPreviewSprite(TFT_eSprite &sprite,
+                       const Eye &left, const Eye &right,
+                       const EyePose &pose) {
+  if (!ENABLE_PREVIEW_DIRTY_PUSH) {
+    sprite.pushSprite(SPRITE_X, SPRITE_Y);
+    return;
+  }
+
+  const SpriteRect bounds = previewPushBounds(left, right, pose,
+                                              SCREEN_WIDTH, SCREEN_HEIGHT);
+  const int32_t sprite_pixels = (int32_t)SCREEN_WIDTH * SCREEN_HEIGHT;
+  if (bounds.w <= 0 || bounds.h <= 0 ||
+      (int32_t)bounds.w * bounds.h >= sprite_pixels * 95 / 100) {
+    sprite.pushSprite(SPRITE_X, SPRITE_Y);
+    return;
+  }
+
+  sprite.pushSprite(SPRITE_X + bounds.x, SPRITE_Y + bounds.y,
+                    bounds.x, bounds.y, bounds.w, bounds.h);
 }
 
 void setup() {
@@ -235,28 +232,11 @@ void setup() {
 
   eyeStateInit(eyes, millis());
   next_frame_ms = millis();
-  renderAbSetSkipLids(false);
-  renderAbSetSkipFill(false);
   Serial.println("[boot] setup() complete, entering loop");
-  if (TEST_AB_CYCLE) {
-    Serial.println("[ab] cycle enabled — modes: baseline, no_push, no_lids, no_fill (5s each)");
-  }
 }
 
 void loop() {
   uint32_t now = millis();
-
-  static AbMode ab_mode = AbMode::Baseline;
-  static uint32_t ab_next_ms = TEST_AB_INTERVAL_MS;
-  static bool ab_skip_push = false;
-  if (TEST_AB_CYCLE && (int32_t)(now - ab_next_ms) >= 0) {
-    ab_next_ms = now + TEST_AB_INTERVAL_MS;
-    ab_mode = static_cast<AbMode>((static_cast<uint8_t>(ab_mode) + 1) %
-                                  static_cast<uint8_t>(AbMode::Count));
-    applyAbMode(ab_mode, ab_skip_push);
-    Serial.printf("[ab] mode=%s\n", abModeName(ab_mode));
-  }
-
   if ((int32_t)(now - next_frame_ms) < 0) return;
   next_frame_ms = now + FRAME_INTERVAL_MS;
 
@@ -299,9 +279,7 @@ void loop() {
     renderEyeOn(spr, kBigLeftEye, eyes);
     const uint32_t r1 = micros();
     selectDisplay(CS_LEFT);
-    if (!ab_skip_push) {
-      spr.pushSprite(SPRITE_X, SPRITE_Y);
-    }
+    spr.pushSprite(SPRITE_X, SPRITE_Y);
     const uint32_t r2 = micros();
     render_us += (r1 - r0);
     push_us   += (r2 - r1);
@@ -312,9 +290,7 @@ void loop() {
     renderEyeOn(spr, kBigRightEye, eyes);
     const uint32_t r1 = micros();
     selectDisplay(CS_RIGHT);
-    if (!ab_skip_push) {
-      spr.pushSprite(SPRITE_X, SPRITE_Y);
-    }
+    spr.pushSprite(SPRITE_X, SPRITE_Y);
     const uint32_t r2 = micros();
     render_us += (r1 - r0);
     push_us   += (r2 - r1);
@@ -325,9 +301,7 @@ void loop() {
     renderEyes(spr, kPreviewLeft, kPreviewRight, eyes);
     const uint32_t r1 = micros();
     selectDisplay(CS_PREVIEW);
-    if (!ab_skip_push) {
-      spr.pushSprite(SPRITE_X, SPRITE_Y);
-    }
+    pushPreviewSprite(spr, kPreviewLeft, kPreviewRight, eyes.pose);
     const uint32_t r2 = micros();
     render_us += (r1 - r0);
     push_us   += (r2 - r1);
@@ -370,8 +344,7 @@ void loop() {
     if ((int32_t)(now - fps_next_ms) >= 0) {
       fps_next_ms = now + 1000;
       const uint32_t n = loop_count ? loop_count : 1;
-      Serial.printf("[fps][%s] %lu  upd=%luus  render=%luus  push=%luus  (total ~%luus/loop)\n",
-                    abModeName(ab_mode),
+      Serial.printf("[fps] %lu  upd=%luus  render=%luus  push=%luus  (total ~%luus/loop)\n",
                     (unsigned long)loop_count,
                     (unsigned long)(sum_upd_us    / n),
                     (unsigned long)(sum_render_us / n),

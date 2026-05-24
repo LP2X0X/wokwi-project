@@ -43,6 +43,14 @@ struct Eye {
   EyeSide side;
 };
 
+// Axis-aligned region inside the sprite buffer, used for cropped push.
+struct SpriteRect {
+  int16_t x;
+  int16_t y;
+  int16_t w;
+  int16_t h;
+};
+
 // Draw one eye's layers INTO the sprite. Does NOT clear or push — used as
 // a building block when you want to compose multiple eyes (preview screen)
 // or draw extra overlays alongside the eye.
@@ -59,6 +67,17 @@ void renderEyes(TFT_eSprite &spr,
                 const Eye &left, const Eye &right,
                 const EyePose &pose);
 
-// A/B profiling toggles — set from main.cpp during perf experiments.
-void renderAbSetSkipLids(bool skip);
-void renderAbSetSkipFill(bool skip);
+// Bounding box of one eye's drawn pixels (sclera + pupil), clipped to the
+// sprite. Mirrors the geometry math in renderEye().
+SpriteRect eyeBounds(const Eye &eye, const EyePose &pose,
+                     int16_t clip_w, int16_t clip_h);
+
+// Minimal axis-aligned union of two rects. Empty rects (w/h <= 0) pass
+// through the other operand unchanged.
+SpriteRect boundsUnion(const SpriteRect &a, const SpriteRect &b);
+
+// Union of both preview-eye bounds — the region to push for the binocular
+// preview screen instead of the full 240×240 sprite.
+SpriteRect previewPushBounds(const Eye &left, const Eye &right,
+                             const EyePose &pose,
+                             int16_t clip_w, int16_t clip_h);

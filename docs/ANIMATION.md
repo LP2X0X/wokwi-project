@@ -654,8 +654,10 @@ struct Eye {
 The fur-cutout build wires two physical OLEDs (one eye each) with a
 sclera radius larger than the screen — the circle deliberately overflows
 the panel, and the cutout in the fur absorbs the overflow so the visible
-portion fills the eye hole. The wokwi preview screen shows both eyes at
-native size on one panel.
+portion fills the eye hole. The Wokwi preview screen shows both eyes at
+half the old sim size (sclera **r = 25**, pupil **r = 6**, centers
+**(88, 120)** / **(152, 120)**) to keep render + SPI push cheap — see
+**[PERFORMANCE.md](PERFORMANCE.md)** for timing notes and tuning.
 
 In `main.cpp`:
 
@@ -748,10 +750,25 @@ spr.pushSprite(0, 0);
 if (has_preview) {
   renderEyes(spr, kPreviewLeft, kPreviewRight, eyes);
   selectDisplay(CS_PREVIEW);
-  spr.pushSprite(0, 0);
+  pushPreviewSprite(spr, kPreviewLeft, kPreviewRight, eyes.pose);
+  // Cropped push: union of both eye bboxes (~213×101 px) instead of
+  // full 240×240. Physical eyes use spr.pushSprite(SPRITE_X, SPRITE_Y).
 }
 deselectAllDisplays();
 ```
+
+**Preview dirty-rect push.** `pushPreviewSprite()` in `main.cpp` calls
+`previewPushBounds()` (in `eye_render.cpp`) to compute the axis-aligned
+union of both preview-eye regions, then uses TFT_eSPI's windowed
+`pushSprite(tx, ty, sx, sy, sw, sh)`. Physical displays keep a full
+sprite push because `PHYS_SCLERA_R = 135` overflows the 240×240 buffer
+and the clipped bounds cover the whole sprite anyway. Flip
+`ENABLE_PREVIEW_DIRTY_PUSH = false` to force full-frame preview push.
+
+On Wokwi (preview only), dirty push cut SPI from ~31 ms to ~20 ms
+(~17 → ~22 fps at r = 50). Half-size preview eyes (r = 25) reduce render
+and push further. Full profiling history, A/B results, and flags:
+**[PERFORMANCE.md](PERFORMANCE.md)**.
 
 TFT_eSPI's own CS handling is disabled (`-DTFT_CS=-1` in
 `platformio.ini`) so the library never toggles CS itself; we own the
@@ -956,9 +973,16 @@ new firmware in place — no need to restart the simulator.
 
 ### Frame rate
 
-Default is ~50 fps (`FRAME_INTERVAL_MS = 20` in `main.cpp`). All easing is
-dt-based, so the look is identical at lower rates — drop to 30 fps if you
-need CPU for sensors / Wi-Fi.
+Target is ~60 fps (`FRAME_INTERVAL_MS = 16` in `main.cpp`). All easing is
+dt-based, so motion stays smooth when the loop runs slower — the frame
+pacer just skips ticks when render+push overrun.
+
+Actual rate is bounded by SPI push and CPU draw time, not the pacer. See
+**[PERFORMANCE.md](PERFORMANCE.md)** for measured Wokwi timings, phase
+breakdown (`[fps] upd=… render=… push=…`), and every display optimization.
+Current preview-only sim: **~22+ fps** with dirty-rect push and half-size
+preview geometry. With all three displays on real hardware, budget ~3×
+that per-frame cost unless bench SPI is faster.
 
 ### Footprint
 

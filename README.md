@@ -48,6 +48,7 @@ src/
     eyes_bitmaps.h             # auto-generated 1bpp Adafruit_GFX bitmaps
 docs/
   ANIMATION.md                 # full animation system guide
+  PERFORMANCE.md               # display loop timing & optimization notes
 diagram.json                   # Wokwi circuit (ESP32-S3 + SSD1306)
 wokwi.toml                     # tells Wokwi where the firmware binaries live
 platformio.ini                 # PlatformIO env (esp32-s3-devkitc-1, Arduino)
@@ -137,7 +138,8 @@ the multi-display setup; CS pin numbers live at the top of
 
 If your real-hardware build doesn't ship with the preview panel, set
 `has_preview = false` in `main.cpp` (the loop then skips the third
-render + push).
+render + push). Preview push optimization is controlled separately by
+`ENABLE_PREVIEW_DIRTY_PUSH`.
 
 ### Two eye geometries, one EyePose
 
@@ -151,9 +153,10 @@ the physical screens. They differ only in static `Eye` geometry:
   (the artwork's ~1/4.5 pupil:sclera diameter ratio). `PHYS_SCALE = 4.0`
   scales the animated drift amplitudes so motion reads proportionally
   on the bigger TFT.
-- **Preview** screen uses `kPreviewLeft` / `kPreviewRight` at smaller
-  radii (50 / 11) with centers at `(80, 120)` and `(160, 120)` so two
-  eyes fit on one 240×240 panel side-by-side.
+- **Preview** screen uses `kPreviewLeft` / `kPreviewRight` at half the
+  previous sim size — sclera / pupil radii **25 / 6** (was 50 / 11),
+  centers at `(88, 120)` and `(152, 120)` — to keep Wokwi render + push
+  cheap while still showing both eyes animating as a pair.
 
 All four constants live at the top of `src/main.cpp` — tune them in one
 place to change the look on real hardware.
@@ -232,6 +235,38 @@ For data model, math, blending rules, tuning knobs, and the full
 extensibility playbook, see:
 
 → **[docs/ANIMATION.md](docs/ANIMATION.md)** — the full animation guide.
+
+→ **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** — loop timing, Wokwi
+profiling results, and every display optimization (dirty push, preview
+geometry, SPI, debug flags).
+
+## Performance (summary)
+
+Each frame: `eyeStateUpdate()` → render into a shared 240×240
+`TFT_eSprite` → `pushSprite()` over SPI. Animation update is
+negligible (~0.2 ms); **render + push** dominate.
+
+Current Wokwi preview build (one panel, half-size eyes, dirty-rect push):
+
+| Phase | Typical | Notes |
+| ----- | ------- | ----- |
+| update | ~0.2 ms | not a bottleneck |
+| render | ~15–30 ms | scales with eye size + animation |
+| push | ~10–20 ms | cropped push; was ~31 ms full-frame |
+| **FPS** | **~22+** | was ~17 before optimizations |
+
+Implemented levers (details in [docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
+
+- **`ENABLE_PREVIEW_DIRTY_PUSH`** — push eye bbox union only (preview)
+- **Half-size preview eyes** — `sclera_r = 25`, centers `(88, 120)` /
+  `(152, 120)`; physical eyes unchanged
+- **240×240 sprite** on ILI9341 (not full 320 px height)
+- **`SPI_FREQUENCY = 80000000`** in `platformio.ini`
+- **`ENABLE_*_DISPLAY`** — disable render+push for unwired panels
+- **`ENABLE_FPS_COUNTER`** — `[fps] upd=… render=… push=…` once per second
+
+Not worth optimizing on preview (A/B tested): skipping lids, skipping
+`fillSprite()`, dirty push on physical eyes (full sprite clip).
 
 ## Troubleshooting
 

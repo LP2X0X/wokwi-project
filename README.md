@@ -1,12 +1,28 @@
-# Susuwatori Eyes — ESP32‑S3 + SSD1306 (Wokwi)
+# Susuwatori Eyes — ESP32‑S3 + TFT_eSPI (Wokwi)
 
-A tiny PlatformIO project that drives 128×64 SSD1306 OLEDs on an ESP32‑S3 to
-render a pair of cartoon eyes. The artwork is split into four independent
-layers (left/right sclera + left/right pupil) so each can be transformed and
-animated separately. The Wokwi diagram has three screens: two render each
-eye big enough to fill the physical fur-cutout build, and a third shows
-both eyes together at native size so you can see how they animate as a
-pair.
+A tiny PlatformIO project that drives SPI TFTs on an ESP32‑S3 to render
+a pair of procedural cartoon eyes — fully parameter-driven, no sprite
+sheets. Everything (sclera, pupil, eyelid arcs) is drawn as anti-aliased
+circles + parabolic arcs each frame, composed off-screen in a
+`TFT_eSprite` and pushed to each physical display via per-display CS.
+
+The Wokwi diagram has three screens: two render each eye big enough to
+fill the physical fur-cutout build, and a third shows both eyes together
+so you can see how they animate as a pair.
+
+> **Driver-agnostic.** The renderer talks to `TFT_eSPI`'s panel-neutral
+> API. The default build targets **ILI9341 (240×320)** because that's
+> the SPI TFT Wokwi ships in its parts catalog. To target real-hardware
+> **ST7789 (240×240)** or **GC9A01 (240×240 round IPS)**, change two
+> build flags in `platformio.ini` — no source code changes required:
+>
+> ```ini
+> -DILI9341_DRIVER=1   ; -> -DST7789_DRIVER=1 or -DGC9A01_DRIVER=1
+> -DTFT_HEIGHT=320     ; -> -DTFT_HEIGHT=240
+> ```
+>
+> `SCREEN_WIDTH` / `SCREEN_HEIGHT` in `main.cpp` resolve to `TFT_WIDTH`
+> / `TFT_HEIGHT` so the eye re-centers automatically on the new panel.
 
 The project runs in [Wokwi](https://wokwi.com/) — no physical hardware required.
 
@@ -92,47 +108,61 @@ The CLI reads `wokwi.toml` and `diagram.json` from the current directory.
 
 ## Wiring (in `diagram.json`)
 
-The project drives **three SSD1306 OLEDs** — two physical eyes that go on
-the real model, plus a wokwi-only "preview" screen that shows both eyes
-together so you can sanity-check the animation while you tune it.
+The project drives **three SPI TFTs** — two physical eyes that go on
+the real model, plus a "preview" screen that shows both eyes together
+so you can sanity-check the animation while you tune it.
 
-| OLED    | role                       | I²C addr | SDA pin | SCL pin | I²C bus |
-| ------- | -------------------------- | -------- | ------- | ------- | ------- |
-| `oled1` | left eye (physical)        | `0x3C`   | GPIO 2  | GPIO 1  | `Wire`  |
-| `oled2` | right eye (physical)       | `0x3C`   | GPIO 6  | GPIO 5  | `Wire1` |
-| `oled3` | both-eye preview (wokwi)   | `0x3D`   | GPIO 2  | GPIO 1  | `Wire`  |
+All three displays share **one SPI bus** (MOSI / SCLK / DC / RST / BL).
+Each has its own **chip-select (CS)** pin so we pick which panel
+receives a given `pushSprite()` by asserting only that CS LOW.
 
-`VCC` → `3V3`, `GND` → `GND` for all. `oled1` and `oled3` share the same
-bus because they have different addresses (most SSD1306 modules have a
-solder jumper for `0x3D` if you ever want to wire it up for real). On a
-real build the preview module is simply absent — `displayP.begin()`
-returns `false`, `has_preview` stays `false`, and the loop skips it.
+| Display | role                          | CS pin   | shared SPI pins                |
+| ------- | ----------------------------- | -------- | ------------------------------ |
+| `tft_l` | left eye (physical)           | GPIO 10  | MOSI=11, SCLK=12, DC=13, RST=14, BL=15 |
+| `tft_r` | right eye (physical)          | GPIO 9   | (same)                         |
+| `tft_p` | both-eye preview (extra panel)| GPIO 8   | (same)                         |
 
-The pin assignments match the `*_SDA_PIN` / `*_SCL_PIN` macros at the top
-of `src/main.cpp`; change both sides if you re-wire.
+`VCC` → `3V3`, `GND` → `GND` for all.
+
+**Wokwi pin names** (ILI9341 in sim): `SCK` = SCLK, `SDI` = MOSI,
+`D/C` = DC, `RESET` = RST, `LED` = backlight. On real **ST7789/GC9A01**
+modules the same lines are labelled `SCL` / `SDA` / `DC` / `RES` /
+`BLK` — wire across by function, not by name.
+
+The bus pin assignments live in `platformio.ini` (TFT_eSPI build flags —
+`TFT_MOSI`, `TFT_SCLK`, `TFT_DC`, `TFT_RST`, `TFT_BL`). The library's
+own CS is disabled (`-DTFT_CS=-1`) because we manage CS manually for
+the multi-display setup; CS pin numbers live at the top of
+`src/main.cpp`.
+
+If your real-hardware build doesn't ship with the preview panel, set
+`has_preview = false` in `main.cpp` (the loop then skips the third
+render + push).
 
 ### Two eye geometries, one EyePose
 
 Both physical eyes and the preview screen render from the **same**
 `EyeState` / `EyePose` — so a blink on the preview is the same blink on
-the physical screens. They differ only in geometry:
+the physical screens. They differ only in static `Eye` geometry:
 
-- **Physical** eyes use `kBigLeftEye` / `kBigRightEye` at `PHYS_SCALE`
-  (default `2.0f`). The sclera is sized to overflow the 128×64 OLED so it
-  fills a larger fur-cutout eye hole. Tune `PHYS_SCALE` in `src/main.cpp`
-  to taste: `1.5` = no overflow, `2.0` = ~12 px clip top/bottom, `2.5+` =
-  wider overflow.
-- **Preview** screen uses `kPreviewLeft` / `kPreviewRight` at native
-  scale (`1.0f`) with the artwork's original positions — both eyes fit on
-  one 128×64 screen so you can see them animate together.
+- **Physical** eyes use `kBigLeftEye` / `kBigRightEye` with
+  `PHYS_SCLERA_R = 135` (diameter 270 — overflows the 240-wide screen by
+  ~15 px per side, soaked up by the fur cutout) and `PHYS_PUPIL_R = 30`
+  (the artwork's ~1/4.5 pupil:sclera diameter ratio). `PHYS_SCALE = 4.0`
+  scales the animated drift amplitudes so motion reads proportionally
+  on the bigger TFT.
+- **Preview** screen uses `kPreviewLeft` / `kPreviewRight` at smaller
+  radii (50 / 11) with centers at `(80, 120)` and `(160, 120)` so two
+  eyes fit on one 240×240 panel side-by-side.
 
-Pupil drift is scaled along with the eye, so motion amplitude looks
-visually proportional on every screen.
+All four constants live at the top of `src/main.cpp` — tune them in one
+place to change the look on real hardware.
 
-> **One screen instead of three?** Delete the screens you don't want from
-> `diagram.json`, drop the matching display + render lines from
-> `main.cpp`. For a single-screen build, render both eyes with
-> `renderEyes(display, kPreviewLeft, kPreviewRight, eyes)`.
+> **One screen instead of three?** Drop the panels you don't want from
+> `diagram.json`, drop the matching `renderEyeOn` / `selectDisplay` /
+> `pushSprite` block from `main.cpp`. For a single-screen build that
+> shows both eyes, call `renderEyes(spr, kPreviewLeft, kPreviewRight,
+> eyes)` and push to the one display.
 
 ## Eye bitmaps — how the four layers are generated
 
@@ -208,13 +238,48 @@ extensibility playbook, see:
 - **`Wokwi: Start Simulator` says "firmware not found"** — you skipped
   `platformio run`, or your `[env:...]` name in `platformio.ini` doesn't
   match the path in `wokwi.toml` (this project uses `esp32s3` for both).
-- **OLED stays blank** — confirm `Wire.begin(SDA_PIN, SCL_PIN)` matches the
-  pins in `diagram.json` (`SDA=GPIO2`, `SCL=GPIO1`) and the I²C address is
-  `0x3C` for the eye modules (`oled1`/`oled2`) and `0x3D` for the preview
-  module (`oled3`).
-- **Preview screen blank but physical eyes work** — `oled3` shares the
-  `Wire` bus with `oled1`; check it's wired to `GPIO 2`/`GPIO 1` and that
-  the `i2cAddress` attr is set to `0x3d`, not `0x3c` (an address collision
-  with `oled1` will silently swallow writes).
+- **All three displays show the same content** — one or more CS pins is
+  stuck LOW. Confirm `CS_LEFT` / `CS_RIGHT` / `CS_PREVIEW` in `main.cpp`
+  match the wiring in `diagram.json` and that `pinMode(... OUTPUT)` ran
+  in `setup()`.
+- **All displays blank / white screen** — backlight off (check `TFT_BL`
+  pin wiring), or the displays never received their init sequence
+  (verify the per-display `tft.init()` loop in `setup()` ran with each
+  CS asserted in turn).
+- **Garbled / shifted pixels** — SPI clock too fast for the wiring. Drop
+  `-DSPI_FREQUENCY` in `platformio.ini` from `40000000` to `27000000` or
+  `20000000` for breadboard setups; bump back up to `60000000` /
+  `80000000` once it's stable.
+- **"Sprite alloc failed" in serial** — `TFT_eSprite::createSprite(240,
+  240)` needs ~115 KB of RAM. On a stock ESP32-S3 that's fine; if you've
+  added a big Wi-Fi/BLE stack later and run out, allocate the sprite in
+  PSRAM via `spr.setPsram(true)` before `createSprite()`.
+- **Wokwi "Board not found"** — Wokwi doesn't ship an ST7789 part, so
+  the sim uses `wokwi-ili9341` (240×320 SPI TFT). Same TFT_eSPI
+  library, same wiring pattern; switching to the real ST7789 / GC9A01
+  panel is a two-flag change in `platformio.ini`.
 - **PlatformIO complains about `~/.platformio` permissions** — fix with
   `sudo chown -R $(whoami) ~/.platformio` (one‑time).
+
+### Switching the panel target
+
+The default build targets **ILI9341 (240×320)** because that's what
+Wokwi has. For real hardware you almost certainly want a different
+panel; the change is two build flags in `platformio.ini`:
+
+| Target          | `*_DRIVER`           | `TFT_HEIGHT` |
+|-----------------|----------------------|--------------|
+| ILI9341 (Wokwi) | `ILI9341_DRIVER=1`   | `320`        |
+| ST7789 1.3" sq  | `ST7789_DRIVER=1`    | `240`        |
+| GC9A01 round    | `GC9A01_DRIVER=1`    | `240`        |
+
+Then rebuild & reflash. No source code changes. Same `TFT_eSPI` API,
+same `TFT_eSprite` framebuffer, same wiring (pins are identical between
+all three drivers). `SCREEN_WIDTH` / `SCREEN_HEIGHT` in `main.cpp`
+resolve to `TFT_WIDTH` / `TFT_HEIGHT` from the build flags, so the eye
+re-centers itself on the new panel.
+
+The eye geometry constants (`PHYS_SCLERA_R = 135`, `PHYS_PUPIL_R = 30`)
+are sized for 240-wide panels — same on ILI9341 and ST7789/GC9A01. On
+ILI9341's taller 240×320 the eye sits centered in the middle of the
+display with empty bands top + bottom.

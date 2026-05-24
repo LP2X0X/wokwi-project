@@ -26,7 +26,10 @@ namespace {
 //   * range  -> drift amplitude in pixels
 //   * tau    -> easing softness in seconds (bigger = slower glide)
 //   * hold   -> wall-clock duration between random target re-rolls
-constexpr float    DRIFT_RANGE_PX    = 1.0f;
+// In "source pixels"; Eye::scale multiplies at draw time. With
+// PHYS_SCALE = 4.0, range 2.0 = ±8 px wander on the 240-panel physical
+// eyes — reads as "alive" without feeling twitchy.
+constexpr float    DRIFT_RANGE_PX    = 2.0f;
 constexpr float    DRIFT_TAU_S       = 0.55f;
 constexpr uint16_t DRIFT_HOLD_MIN_MS = 900;
 constexpr uint16_t DRIFT_HOLD_MAX_MS = 3000;

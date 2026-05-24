@@ -669,24 +669,39 @@ constexpr float   PHYS_SCALE    = 2.0f;      // doubles ANIMATION amplitude only
 
 ### Render pipeline
 
-```
-renderEyes(d, left, right, pose):
-    clearDisplay()
-    renderEye(d, left,  pose)
-    renderEye(d, right, pose)
-    display()
+The renderer draws into a **`TFT_eSprite`** (off-screen 16-bit RGB565
+framebuffer). Pushing the sprite to a physical display lives in the
+caller — that split is what lets us drive multiple ST7789s on a shared
+SPI bus from ONE sprite: render once, push to each display via
+per-display CS toggling. For future GC9A01 round IPS migration, only the
+`platformio.ini` driver flag changes; the renderer code is identical.
 
-renderEye(d, eye, pose):
+```
+renderEyes(spr, left, right, pose):
+    spr.fillSprite(BG_BLACK)
+    renderEye(spr, left,  pose)
+    renderEye(spr, right, pose)
+    # No push — caller asserts the target display's CS and calls
+    # spr.pushSprite(0, 0).
+
+renderEye(spr, eye, pose):
     # Three scale knobs sit on top of the static circle geometry:
-    #   pose.eye_open_amount → stretches sclera HEIGHT only (curiosity peak
-    #                          ~2.0 = ellipse). Width never changes.
+    #   pose.eye_open_amount → stretches sclera HEIGHT only (curiosity
+    #                          peak ~2.0 = ellipse). Width never changes.
     #   pose.pupil_scale     → uniform multiplier on the pupil radius.
-    #   eye.scale            → per-display zoom for the ANIMATED drift only.
+    #   eye.scale            → per-display zoom for the ANIMATED drift
+    #                          only (geometry radii are absolute).
     sclera_rx = eye.sclera_r
     sclera_ry = eye.sclera_r * pose.eye_open_amount
 
-    fillEllipse(d, eye.sclera_cx, eye.sclera_cy,
-                sclera_rx, sclera_ry, WHITE)                            # 1
+    # Sclera: anti-aliased when not stretched (most frames), plain
+    # ellipse during the curiosity Y-stretch. Smooth-circle uses the BG
+    # color to blend edge pixels — that's the smoothness win over the
+    # old SSD1306 1-bpp pipeline.
+    if sclera_rx == sclera_ry:
+        spr.fillSmoothCircle(cx, cy, sclera_rx, WHITE, BLACK)           # 1 (AA)
+    else:
+        spr.fillEllipse(cx, cy, sclera_rx, sclera_ry, WHITE)            # 1 (plain)
 
     # Pupil position: sclera center + neutral offset + scaled drift.
     # Pick per-eye additive offset based on Eye::side.
@@ -697,24 +712,50 @@ renderEye(d, eye, pose):
     pupil_cy = eye.sclera_cy + eye.pupil_dy_neutral
                + (pose.pupil_dy + extra_y) * eye.scale
     pupil_r  = eye.pupil_r * pose.pupil_scale
-    fillCircle(d, pupil_cx, pupil_cy, pupil_r, BLACK)                   # 2 (hole)
+    spr.fillSmoothCircle(pupil_cx, pupil_cy, pupil_r, BLACK, WHITE)     # 2 (AA hole)
 
     # Eyelid bbox follows the (possibly stretched) sclera ellipse. We
     # use 2*r + 1 (NOT 2*r) so the loop covers the inclusive [-r, +r]
-    # range that fillCircle / fillEllipse paint — otherwise a 1-px
-    # sliver of sclera stays visible at the lateral edges during a full
-    # blink (the parabolic bow goes to 0 at xn = ±1).
+    # range the fills paint — otherwise a 1-px sliver of sclera stays
+    # visible at the lateral edges during a full blink (parabolic bow
+    # goes to 0 at xn = ±1). Lid columns are filled in BG color, which
+    # is a no-op over already-BG pixels so the silhouette is clipped
+    # naturally — no mask needed.
     bbox_w = 2 * sclera_rx + 1
     bbox_h = 2 * sclera_ry + 1
-    drawCurvedLid(d, bbox, upper_lid_y, curvature, fill_from_top=true)  # 3
-    drawCurvedLid(d, bbox, lower_lid_y, curvature, fill_from_top=false) # 4
+    drawCurvedLid(spr, bbox, upper_lid_y, curvature, fill_from_top=true) # 3
+    drawCurvedLid(spr, bbox, lower_lid_y, curvature, fill_from_top=false)# 4
 ```
 
-`fillEllipse` is a scanline implementation built on top of
-`drawFastHLine`; when `rx == ry` it dispatches to `Adafruit_GFX::fillCircle`
-which uses the midpoint algorithm and is faster. Off-screen pixels clip
-silently so circles that overflow the panel work without any explicit
-bounds checks.
+`fillSmoothCircle` anti-aliases the circle edge against the supplied
+background color, which is why the sclera and pupil read clean on 240
+panels instead of stair-stepping. There's no `fillSmoothEllipse` in
+TFT_eSPI, so the curiosity Y-stretch uses plain `fillEllipse` — fine in
+practice since the stretched state is brief.
+
+**Pushing to multiple physical displays** (in `main.cpp`):
+
+```cpp
+// Single shared SPI bus + per-display CS pins.
+renderEyeOn(spr, kBigLeftEye, eyes);
+selectDisplay(CS_LEFT);    // CS_LEFT LOW, others HIGH
+spr.pushSprite(0, 0);
+
+renderEyeOn(spr, kBigRightEye, eyes);
+selectDisplay(CS_RIGHT);
+spr.pushSprite(0, 0);
+
+if (has_preview) {
+  renderEyes(spr, kPreviewLeft, kPreviewRight, eyes);
+  selectDisplay(CS_PREVIEW);
+  spr.pushSprite(0, 0);
+}
+deselectAllDisplays();
+```
+
+TFT_eSPI's own CS handling is disabled (`-DTFT_CS=-1` in
+`platformio.ini`) so the library never toggles CS itself; we own the
+timing.
 
 `Eye::side` (`Left` / `Right`) decides which `pupil_d*_extra` the
 renderer reads — this is how the same `EyePose` produces visibly

@@ -1,74 +1,106 @@
 #include <Arduino.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
 
 #include "anim/eye_anim.h"
+#include "anim/eye_render.h"
 
-#define SCREEN_WIDTH   128
-#define SCREEN_HEIGHT   64
-#define OLED_RESET      -1
-#define SCREEN_ADDRESS 0x3C
+// Sprite framebuffer dimensions — fixed 240×240 regardless of panel.
+// On ST7789/GC9A01 (240×240) this fills the panel exactly. On ILI9341
+// (240×320, Wokwi default) the sprite sits centered, with the top/
+// bottom 40 px of the panel staying at the initial-fill BG color.
+// Keeping the sprite 240² shaves ~25% of SPI bandwidth on the ILI9341
+// build, which translates directly to higher framerate and tighter
+// display-to-display sync.
+#define SCREEN_WIDTH   240
+#define SCREEN_HEIGHT  240
 
-// Two physical OLEDs on two separate I2C buses. SSD1306 modules are hard-
-// wired to address 0x3C, so they can't share a bus — Wire drives the left
-// eye, Wire1 drives the right eye. Both buses run at default 100 kHz.
-// A third OLED (wokwi-only preview) sits on Wire at 0x3D — same bus as the
-// left eye but a different address so the two coexist. On real hardware
-// the preview module is simply absent and we skip it.
-#define LEFT_SDA_PIN   2
-#define LEFT_SCL_PIN   1
-#define RIGHT_SDA_PIN  6
-#define RIGHT_SCL_PIN  5
-#define SCREEN_ADDRESS_PREVIEW 0x3D
+// Where the 240×240 sprite lands on the actual TFT panel. Centered, so
+// any panel of width >= 240 works.
+constexpr int16_t SPRITE_X = (TFT_WIDTH  - SCREEN_WIDTH ) / 2;
+constexpr int16_t SPRITE_Y = (TFT_HEIGHT - SCREEN_HEIGHT) / 2;
 
-// ~60 fps — matches the SSD1306's ~62 Hz internal refresh. Lower if you
-// want to free CPU for sensors/wifi later.
+// Per-display chip-select pins. Three ST7789 modules share ONE SPI bus
+// (MOSI/SCLK/DC/RST/BL configured in platformio.ini build flags); each
+// has its own CS so we pick which one receives a given pushSprite() by
+// asserting only that pin LOW. TFT_eSPI's library-managed CS is disabled
+// (TFT_CS=-1 in build flags) so we own the timing here.
+//
+// Future GC9A01 round-IPS migration: same pins, same wiring; only the
+// build flag changes (ST7789_DRIVER -> GC9A01_DRIVER) and the Wokwi part.
+#define CS_LEFT     10
+#define CS_RIGHT     9
+#define CS_PREVIEW   8
+
+// ~60 fps target. TFT pushes at 40 MHz SPI take ~23 ms for a full 240×240
+// frame, so three displays per frame is ~70 ms / ~14 fps without DMA. The
+// loop is paced at the FRAME_INTERVAL_MS target, so if pushes take
+// longer, frames just stretch — easing is dt-based and stays smooth.
+// Bump SPI_FREQUENCY to 80 MHz in platformio.ini for ~30 fps on real
+// hardware with good wiring.
 constexpr uint16_t FRAME_INTERVAL_MS = 16;
 
 // TEST: pin sleepy_amount to 1.0 every frame to see the maximum droop.
-// Set to false to restore the autonomous mood drift.
 constexpr bool TEST_PIN_MAX_SLEEPY = false;
 
 // TEST: cancel micro motion's contribution to the pose so only idle gaze
 // drives the pupil position — useful for tuning the gaze behavior in
-// isolation. Sleepy y-bias and idle gaze (per-eye extras) still apply.
-// Set to false to restore the always-on micro drift.
+// isolation.
 constexpr bool TEST_DISABLE_MICRO_MOTION = false;
 
-// Physical eye scale. The fur-cutout build has eye holes larger than the
-// OLED active area, so we render the eye big enough to overflow the 128×64
-// screen — the visible portion fills the cutout. Multiplies the ANIMATED
-// drift only; the sclera/pupil radii below are absolute pixels.
-constexpr float PHYS_SCALE = 2.0f;
+// Per-display enables. Each render + push spends real time per frame
+// (sprite re-render + SPI bus time) even when no panel is wired to that
+// CS, so disabling a display in diagram.json without flipping these to
+// false leaves the work in the loop. Set to false for any panel you're
+// not actually using in the current test config.
+constexpr bool ENABLE_LEFT_DISPLAY    = false;  // re-enable on real hw
+constexpr bool ENABLE_RIGHT_DISPLAY   = false;  // re-enable on real hw
+constexpr bool ENABLE_PREVIEW_DISPLAY = true;
 
-// Physical sclera / pupil radii.
-//   PHYS_SCLERA_R = 72 → diameter 144, overflows the 128-wide screen by 8 px
-//   per side. The fur cutout absorbs the overflow horizontally as well as
-//   vertically, so the visible eye reads as a slice of an even larger ball.
-//   PHYS_PUPIL_R  = 16 → pupil_diameter / sclera_diameter = 1/4.5 (smaller,
-//   more focused pupil than the source artwork's 1/3 — matches the Ghibli
-//   reference better).
-constexpr int16_t PHYS_SCLERA_R = 64;
-constexpr int16_t PHYS_PUPIL_R  = 16;
+// Per-frame heartbeat (rich state dump every 250 ms). USEFUL FOR DEBUG,
+// EXPENSIVE: Serial output on Wokwi's simulated UART can drain slowly
+// and dominate per-loop time. Off by default; flip true to inspect
+// drift/lid/gaze values when something looks wrong.
+constexpr bool ENABLE_HEARTBEAT       = false;
 
-Adafruit_SSD1306 displayL(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire,  OLED_RESET);
-Adafruit_SSD1306 displayR(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
-Adafruit_SSD1306 displayP(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire,  OLED_RESET);
-bool has_preview = false;
+// Cheap FPS counter — ONE printf per second, regardless of frame rate.
+// Always on so we can confirm the loop is healthy and see whether
+// other changes (sprite size, SPI speed, display count) actually help.
+constexpr bool ENABLE_FPS_COUNTER     = true;
+
+// A/B perf sweep — cycles through render/push isolation modes every 5 s
+// so one Wokwi run captures baseline vs no-push vs no-lids vs no-fill.
+// Flip false when done profiling.
+constexpr bool TEST_AB_CYCLE          = true;
+constexpr uint32_t TEST_AB_INTERVAL_MS = 5000;
+
+// Physical sclera / pupil radii on the 240×240 panel.
+//   PHYS_SCLERA_R = 135 → diameter 270, overflows the 240-wide screen by
+//   15 px per side (fur cutout absorbs the rest). Same intent as the
+//   previous 128-OLED setup.
+//   PHYS_PUPIL_R  = 30  → keeps the ~1/4.5 pupil-to-sclera diameter
+//   ratio that matches the Ghibli reference.
+constexpr int16_t PHYS_SCLERA_R = 135;
+constexpr int16_t PHYS_PUPIL_R  = 30;
+
+// Animation amplitude multiplier — drift values from behaviors are in
+// "source pixel" units (e.g. ±1.5 px); PHYS_SCALE = 4.0 maps that to
+// ±6 px on the bigger 240 panel, preserving the perceived motion ratio
+// from the 128 OLED build (which used PHYS_SCALE = 2.0).
+constexpr float PHYS_SCALE = 4.0f;
+
+TFT_eSPI    tft = TFT_eSPI();
+TFT_eSprite spr = TFT_eSprite(&tft);
+
+bool has_preview = true;  // set false if you build a 2-display variant.
 
 // --- Per-physical-eye configs: sclera overflows the screen on all sides ---
-// Centered on the screen → the circle overflows by (PHYS_SCLERA_R - 64) px
-// horizontally and (PHYS_SCLERA_R - 32) px vertically (the fur cutout
-// absorbs the overflow). Pupil neutral offset preserves the slight inward
-// bias from the original artwork (±8 source px × PHYS_SCALE = ±16), which
-// is part of the susuwatari look.
 const Eye kBigLeftEye = {
   /*sclera_cx=*/SCREEN_WIDTH  / 2,
   /*sclera_cy=*/SCREEN_HEIGHT / 2,
   /*sclera_r =*/PHYS_SCLERA_R,
-  /*pupil_dx_neutral=*/(int16_t)( 16 * PHYS_SCALE),
-  /*pupil_dy_neutral=*/(int16_t)(-1),
+  /*pupil_dx_neutral=*/(int16_t)( 8 * PHYS_SCALE),
+  /*pupil_dy_neutral=*/(int16_t)(-1 * PHYS_SCALE / 2),
   /*pupil_r        =*/PHYS_PUPIL_R,
   PHYS_SCALE,
   EyeSide::Left,
@@ -78,80 +110,153 @@ const Eye kBigRightEye = {
   /*sclera_cx=*/SCREEN_WIDTH  / 2,
   /*sclera_cy=*/SCREEN_HEIGHT / 2,
   /*sclera_r =*/PHYS_SCLERA_R,
-  /*pupil_dx_neutral=*/(int16_t)(-16 * PHYS_SCALE),
+  /*pupil_dx_neutral=*/(int16_t)(-8 * PHYS_SCALE),
   /*pupil_dy_neutral=*/0,
   /*pupil_r        =*/PHYS_PUPIL_R,
   PHYS_SCALE,
   EyeSide::Right,
 };
 
-// --- Preview config: both eyes side-by-side on one 128×64 screen ---
-// Native sizes preserved (sclera_r = 18, pupil_r = 6) so the wokwi preview
-// shows the eyes at their authored proportions. Both eyes have the inward
-// pupil bias (left +8, right -8) just like the physical config — same look,
-// smaller scale.
+// --- Preview config: both eyes side-by-side on one 240×240 screen ---
+// Sclera radius scaled down so two eyes fit horizontally. PREVIEW_SCALE
+// (= 1.5) multiplies the source drift to keep motion visually
+// proportional on the smaller-per-eye preview.
+constexpr float PREVIEW_SCALE = 1.5f;
+
 const Eye kPreviewLeft = {
-  /*sclera_cx=*/43,
-  /*sclera_cy=*/31,
-  /*sclera_r =*/18,
-  /*pupil_dx_neutral=*/ 8,
+  /*sclera_cx=*/64,
+  /*sclera_cy=*/120,
+  /*sclera_r =*/50,
+  /*pupil_dx_neutral=*/12,
   /*pupil_dy_neutral=*/ 0,
-  /*pupil_r        =*/ 6,
-  1.0f,
+  /*pupil_r        =*/11,
+  PREVIEW_SCALE,
   EyeSide::Left,
 };
 
 const Eye kPreviewRight = {
-  /*sclera_cx=*/87,
-  /*sclera_cy=*/31,
-  /*sclera_r =*/18,
-  /*pupil_dx_neutral=*/-8,
+  /*sclera_cx=*/176,
+  /*sclera_cy=*/120,
+  /*sclera_r =*/50,
+  /*pupil_dx_neutral=*/-12,
   /*pupil_dy_neutral=*/ 0,
-  /*pupil_r        =*/ 6,
-  1.0f,
+  /*pupil_r        =*/11,
+  PREVIEW_SCALE,
   EyeSide::Right,
 };
 
 EyeState eyes;
 uint32_t next_frame_ms = 0;
 
+enum class AbMode : uint8_t {
+  Baseline = 0,
+  NoPush,
+  NoLids,
+  NoFill,
+  Count,
+};
+
+inline const char *abModeName(AbMode mode) {
+  switch (mode) {
+    case AbMode::Baseline: return "baseline";
+    case AbMode::NoPush:   return "no_push";
+    case AbMode::NoLids:   return "no_lids";
+    case AbMode::NoFill:   return "no_fill";
+    case AbMode::Count:    return "?";
+  }
+  return "?";
+}
+
+void applyAbMode(AbMode mode, bool &skip_push) {
+  skip_push = (mode == AbMode::NoPush);
+  renderAbSetSkipLids(mode == AbMode::NoLids);
+  renderAbSetSkipFill(mode == AbMode::NoFill);
+}
+
+// Assert one display's CS LOW (and all others HIGH) so the next SPI
+// transaction lands on that display only. The shared MOSI/SCLK/DC/RST
+// pins are seen by every panel; CS is what gates them.
+inline void selectDisplay(int cs_pin) {
+  digitalWrite(CS_LEFT,    cs_pin == CS_LEFT    ? LOW : HIGH);
+  digitalWrite(CS_RIGHT,   cs_pin == CS_RIGHT   ? LOW : HIGH);
+  digitalWrite(CS_PREVIEW, cs_pin == CS_PREVIEW ? LOW : HIGH);
+}
+
+inline void deselectAllDisplays() {
+  digitalWrite(CS_LEFT,    HIGH);
+  digitalWrite(CS_RIGHT,   HIGH);
+  digitalWrite(CS_PREVIEW, HIGH);
+}
+
 void setup() {
   Serial.begin(115200);
+  // USB-CDC needs a moment to enumerate on ESP32-S3 — without this any
+  // setup() prints before ~100 ms get dropped, so a crash here would
+  // boot-loop silently.
+  delay(200);
+  Serial.println("[boot] setup() entered");
 
-  // Two independent I2C buses, one per display.
-  Wire.begin (LEFT_SDA_PIN,  LEFT_SCL_PIN);
-  Wire1.begin(RIGHT_SDA_PIN, RIGHT_SCL_PIN);
+  // Per-display CS pins. Start deselected so the first tft.init() below
+  // doesn't accidentally hit the wrong panel.
+  pinMode(CS_LEFT,    OUTPUT);
+  pinMode(CS_RIGHT,   OUTPUT);
+  pinMode(CS_PREVIEW, OUTPUT);
+  deselectAllDisplays();
+  Serial.println("[boot] CS pins configured");
 
-  // Default Wire clock is 100 kHz — at ~92 ms per 1 KB SSD1306 frame that
-  // drops us to ~3–4 fps with three displays and makes the L/R update gap
-  // visible. 1 MHz is well within SSD1306 module tolerance and brings us
-  // back to the targeted ~50 fps. Drop to 400 000 if you ever see corruption
-  // on long wires / cheap modules on real hardware.
-  Wire.setClock (1000000);
-  Wire1.setClock(1000000);
-
-  if (!displayL.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println("Left SSD1306 allocation failed");
-    for (;;);
+  // First tft.init() does the heavy lifting: SPI.begin() on HSPI, then
+  // ILI9341/ST7789/GC9A01 wake-up sequence. Each subsequent call skips
+  // SPI bring-up (tracked via _booted inside the library) and only
+  // emits the per-display command stream. Order doesn't matter — three
+  // identical panels.
+  for (int cs : {CS_LEFT, CS_RIGHT, CS_PREVIEW}) {
+    digitalWrite(cs, LOW);
+    tft.init();
+    tft.setRotation(0);
+    tft.fillScreen(TFT_BLACK);
+    digitalWrite(cs, HIGH);
+    Serial.printf("[boot] display init OK on CS=%d\n", cs);
   }
-  if (!displayR.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println("Right SSD1306 allocation failed");
-    for (;;);
-  }
 
-  // Preview screen is wokwi-only — on real hardware it's absent, so we
-  // don't bomb; we just skip rendering to it.
-  has_preview = displayP.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS_PREVIEW);
-  if (!has_preview) {
-    Serial.println("Preview SSD1306 not detected (wokwi-only); skipping");
+  // Sprite framebuffer — one 16-bit RGB565 buffer the size of the
+  // configured panel (240×320 in Wokwi/ILI9341, 240×240 on ST7789/
+  // GC9A01). Re-used per display: each frame we render into the
+  // sprite up to three times and pushSprite() to the matching CS.
+  // setSwapBytes(true) flips RGB565 byte order to match what the
+  // panel expects.
+  if (spr.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT) == nullptr) {
+    Serial.printf("[boot] Sprite alloc failed — %d x %d x 2 bytes too big.\n",
+                  SCREEN_WIDTH, SCREEN_HEIGHT);
+    for (;;) { delay(1000); }
   }
+  spr.setSwapBytes(true);
+  Serial.printf("[boot] sprite allocated: %d x %d\n",
+                SCREEN_WIDTH, SCREEN_HEIGHT);
 
   eyeStateInit(eyes, millis());
   next_frame_ms = millis();
+  renderAbSetSkipLids(false);
+  renderAbSetSkipFill(false);
+  Serial.println("[boot] setup() complete, entering loop");
+  if (TEST_AB_CYCLE) {
+    Serial.println("[ab] cycle enabled — modes: baseline, no_push, no_lids, no_fill (5s each)");
+  }
 }
 
 void loop() {
   uint32_t now = millis();
+
+  static AbMode ab_mode = AbMode::Baseline;
+  static uint32_t ab_next_ms = TEST_AB_INTERVAL_MS;
+  static bool ab_skip_push = false;
+  if (TEST_AB_CYCLE && (int32_t)(now - ab_next_ms) >= 0) {
+    ab_next_ms = now + TEST_AB_INTERVAL_MS;
+    ab_mode = static_cast<AbMode>((static_cast<uint8_t>(ab_mode) + 1) %
+                                  static_cast<uint8_t>(AbMode::Count));
+    applyAbMode(ab_mode, ab_skip_push);
+    Serial.printf("[ab] mode=%s\n", abModeName(ab_mode));
+  }
+
   if ((int32_t)(now - next_frame_ms) < 0) return;
   next_frame_ms = now + FRAME_INTERVAL_MS;
 
@@ -163,9 +268,10 @@ void loop() {
 
   // Future gaze-tracking integration would call:
   //   eyeSetGazeTarget(eyes, face_dx_px, face_dy_px, /*weight=*/1.0f);
-  // every frame from a face detector. Micro motion smooths the signal, so
-  // even noisy detections turn into organic eye follow.
+  // every frame from a face detector. Micro motion smooths the signal,
+  // so even noisy detections turn into organic eye follow.
 
+  const uint32_t t_update_start = micros();
   eyeStateUpdate(eyes, now);
 
   // Cancel micro motion's contribution AFTER composePose has run, so the
@@ -177,15 +283,101 @@ void loop() {
     eyes.pose.pupil_dx -= eyes.micro.drift_x;
     eyes.pose.pupil_dy -= eyes.micro.drift_y;
   }
+  const uint32_t t_update_end = micros();
 
-  // Both eyes share one EyePose (binocular pair: shared drift, shared
-  // blink), but they render in two different geometries:
-  //   - displayL/displayR: big, screen-filling eyes — match the fur-cutout build.
-  //   - displayP        : both eyes at native size on one screen, for the
-  //                       wokwi-only "together" preview.
-  renderEyeOn(displayL, kBigLeftEye,  eyes);
-  renderEyeOn(displayR, kBigRightEye, eyes);
-  if (has_preview) {
-    renderEyes(displayP, kPreviewLeft, kPreviewRight, eyes);
+  // Render once per display into the shared sprite, then pushSprite()
+  // with the matching CS asserted. Each push is gated so disabling a
+  // panel for testing actually frees its SPI slot instead of just
+  // hiding the output. Per-phase micros() let the FPS counter below
+  // break down loop time into update / render / push so we can target
+  // optimizations to the actual bottleneck.
+  uint32_t render_us = 0;
+  uint32_t push_us   = 0;
+
+  if (ENABLE_LEFT_DISPLAY) {
+    const uint32_t r0 = micros();
+    renderEyeOn(spr, kBigLeftEye, eyes);
+    const uint32_t r1 = micros();
+    selectDisplay(CS_LEFT);
+    if (!ab_skip_push) {
+      spr.pushSprite(SPRITE_X, SPRITE_Y);
+    }
+    const uint32_t r2 = micros();
+    render_us += (r1 - r0);
+    push_us   += (r2 - r1);
+  }
+
+  if (ENABLE_RIGHT_DISPLAY) {
+    const uint32_t r0 = micros();
+    renderEyeOn(spr, kBigRightEye, eyes);
+    const uint32_t r1 = micros();
+    selectDisplay(CS_RIGHT);
+    if (!ab_skip_push) {
+      spr.pushSprite(SPRITE_X, SPRITE_Y);
+    }
+    const uint32_t r2 = micros();
+    render_us += (r1 - r0);
+    push_us   += (r2 - r1);
+  }
+
+  if (ENABLE_PREVIEW_DISPLAY && has_preview) {
+    const uint32_t r0 = micros();
+    renderEyes(spr, kPreviewLeft, kPreviewRight, eyes);
+    const uint32_t r1 = micros();
+    selectDisplay(CS_PREVIEW);
+    if (!ab_skip_push) {
+      spr.pushSprite(SPRITE_X, SPRITE_Y);
+    }
+    const uint32_t r2 = micros();
+    render_us += (r1 - r0);
+    push_us   += (r2 - r1);
+  }
+
+  deselectAllDisplays();
+  const uint32_t update_us = t_update_end - t_update_start;
+
+  // Debug heartbeat — gated by ENABLE_HEARTBEAT so it's a no-op when
+  // disabled (no Serial.printf cost at all, not even argument eval).
+  if (ENABLE_HEARTBEAT) {
+    static uint32_t next_hb_ms = 0;
+    if ((int32_t)(now - next_hb_ms) >= 0) {
+      next_hb_ms = now + 250;
+      Serial.printf("[hb] t=%lu drift=(%.2f,%.2f) lid=%.2f next_blink_in=%ld "
+                    "gaze_l=(%.2f,%.2f) gaze_r=(%.2f,%.2f)\n",
+                    (unsigned long)now,
+                    eyes.pose.pupil_dx, eyes.pose.pupil_dy,
+                    eyes.blink.lid_close,
+                    (long)((int32_t)(eyes.blink.blink_next_ms - now)),
+                    eyes.idle_gaze.gx_l, eyes.idle_gaze.gy_l,
+                    eyes.idle_gaze.gx_r, eyes.idle_gaze.gy_r);
+    }
+  }
+
+  // FPS + phase-time breakdown — one printf per second tells us the
+  // true loop rate plus where the time went (update / render / push).
+  // Counter cost is a few increments + one compare per loop, below
+  // noise.
+  if (ENABLE_FPS_COUNTER) {
+    static uint32_t loop_count   = 0;
+    static uint32_t fps_next_ms  = 1000;
+    static uint32_t sum_upd_us   = 0;
+    static uint32_t sum_render_us= 0;
+    static uint32_t sum_push_us  = 0;
+    ++loop_count;
+    sum_upd_us    += update_us;
+    sum_render_us += render_us;
+    sum_push_us   += push_us;
+    if ((int32_t)(now - fps_next_ms) >= 0) {
+      fps_next_ms = now + 1000;
+      const uint32_t n = loop_count ? loop_count : 1;
+      Serial.printf("[fps][%s] %lu  upd=%luus  render=%luus  push=%luus  (total ~%luus/loop)\n",
+                    abModeName(ab_mode),
+                    (unsigned long)loop_count,
+                    (unsigned long)(sum_upd_us    / n),
+                    (unsigned long)(sum_render_us / n),
+                    (unsigned long)(sum_push_us   / n),
+                    (unsigned long)((sum_upd_us + sum_render_us + sum_push_us) / n));
+      loop_count = sum_upd_us = sum_render_us = sum_push_us = 0;
+    }
   }
 }

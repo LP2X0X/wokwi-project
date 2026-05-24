@@ -39,7 +39,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <Adafruit_SSD1306.h>
+#include <TFT_eSPI.h>
 
 #include "eye_pose.h"
 #include "eye_render.h"
@@ -80,19 +80,22 @@ void eyeStateInit(EyeState &s, uint32_t now_ms);
 // the final pose. Renderer reads `s.pose` afterwards.
 void eyeStateUpdate(EyeState &s, uint32_t now_ms);
 
-// Renders both eyes from `s.pose`. Convenience that hides EyePose from
-// callers that just want to draw and forget. Internally calls
-// renderEyes(d, l, r, s.pose).
-void renderEyes(Adafruit_SSD1306 &d,
+// Renders both eyes from `s.pose` into the given sprite. Convenience
+// that hides EyePose from callers that just want to draw and forget.
+// Internally calls renderEyes(spr, l, r, s.pose). Pushing the sprite to
+// a physical display is the caller's responsibility (see main.cpp).
+void renderEyes(TFT_eSprite &spr,
                 const Eye &left, const Eye &right,
                 const EyeState &s);
 
-// Render a single eye on its own display. Convenience overload that pulls
-// the pose out of EyeState. Use when each eye lives on its own physical
-// OLED:
-//   renderEyeOn(displayL, kLeftEye,  eyes);
-//   renderEyeOn(displayR, kRightEye, eyes);
-void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s);
+// Render a single eye into the given sprite. Convenience overload that
+// pulls the pose out of EyeState. Used when each eye lives on its own
+// physical TFT — render to the shared sprite, then assert that display's
+// CS and pushSprite():
+//   renderEyeOn(spr, kLeftEye,  eyes);
+//   selectDisplay(CS_LEFT);
+//   spr.pushSprite(0, 0);
+void renderEyeOn(TFT_eSprite &spr, const Eye &eye, const EyeState &s);
 
 // External hook: nudge the sleepy target (e.g. from a light sensor or time
 // of day). The autonomous re-roll inside sleepyUpdate() will eventually

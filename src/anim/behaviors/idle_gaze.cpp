@@ -9,9 +9,14 @@ namespace {
 // ---- Tunables (private) ----
 // Glance buckets, in pixels. Tiny next to micro_motion's 2 px wobble — but
 // the long holds between glances are what make even 1-2 px feel intentional.
-constexpr float SMALL_RANGE_PX   = 1.5f;
-constexpr float MEDIUM_RANGE_PX  = 3.5f;
-constexpr float LARGE_RANGE_PX   = 6.0f;
+// Glance amplitudes in source pixels; the renderer scales them by
+// Eye::scale, so on the 240-px physical panels (PHYS_SCALE = 4.0) a
+// LARGE glance is ±40 px — a clear, deliberate look. Subtle SMALL and
+// MEDIUM buckets keep the dominant feel of "mostly resting, occasional
+// real glance."
+constexpr float SMALL_RANGE_PX   = 3.0f;
+constexpr float MEDIUM_RANGE_PX  = 6.0f;
+constexpr float LARGE_RANGE_PX   = 10.0f;
 
 // Vertical weight per bucket. Real eye movement is more horizontal than
 // vertical; large bucket allows occasional curious upward/downward looks.

@@ -7,9 +7,12 @@ namespace {
 // Tunables.
 constexpr uint16_t BLINK_GAP_MIN_MS  = 2200;
 constexpr uint16_t BLINK_GAP_MAX_MS  = 5800;
-constexpr uint16_t BLINK_CLOSE_MS    = 90;     // fast snap closed
-constexpr uint16_t BLINK_HOLD_MS     = 40;     // brief full-closed hold
-constexpr uint16_t BLINK_OPEN_MS     = 160;    // slower lift open
+// 360 ms total at the ~20 fps we get with 80 MHz SPI → ~7 rendered
+// frames per blink. Close-fast / open-slow asymmetry preserved (real
+// eyes are 4-5× quicker to close than open).
+constexpr uint16_t BLINK_CLOSE_MS    = 120;
+constexpr uint16_t BLINK_HOLD_MS     = 60;
+constexpr uint16_t BLINK_OPEN_MS     = 180;
 constexpr uint8_t  DOUBLE_BLINK_PCT  = 18;     // % chance after a blink
 constexpr uint16_t DOUBLE_GAP_MIN_MS = 90;
 constexpr uint16_t DOUBLE_GAP_MAX_MS = 180;

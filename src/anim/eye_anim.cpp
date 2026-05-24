@@ -123,14 +123,14 @@ void eyeStateUpdate(EyeState &s, uint32_t now_ms) {
   composePose(s, mods, s.pose);
 }
 
-void renderEyes(Adafruit_SSD1306 &d,
+void renderEyes(TFT_eSprite &spr,
                 const Eye &left, const Eye &right,
                 const EyeState &s) {
-  ::renderEyes(d, left, right, s.pose);
+  ::renderEyes(spr, left, right, s.pose);
 }
 
-void renderEyeOn(Adafruit_SSD1306 &d, const Eye &eye, const EyeState &s) {
-  ::renderEyeOn(d, eye, s.pose);
+void renderEyeOn(TFT_eSprite &spr, const Eye &eye, const EyeState &s) {
+  ::renderEyeOn(spr, eye, s.pose);
 }
 
 void eyeStateSetSleepy(EyeState &s, float target) {

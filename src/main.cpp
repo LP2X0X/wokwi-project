@@ -48,14 +48,30 @@ constexpr bool TEST_PIN_MAX_SLEEPY = false;
 // isolation.
 constexpr bool TEST_DISABLE_MICRO_MOTION = false;
 
+// TEST: bypass the sprite / animation pipeline entirely and just cycle
+// solid colors (RED → GREEN → BLUE → WHITE) directly via tft.fillScreen.
+// Use this to confirm panel + wiring + init independent of the renderer.
+constexpr bool TEST_DIRECT_FILL = false;
+
 // Per-display enables. Each render + push spends real time per frame
 // (sprite re-render + SPI bus time) even when no panel is wired to that
 // CS, so disabling a display in diagram.json without flipping these to
 // false leaves the work in the loop. Set to false for any panel you're
 // not actually using in the current test config.
-constexpr bool ENABLE_LEFT_DISPLAY    = false;  // re-enable on real hw
-constexpr bool ENABLE_RIGHT_DISPLAY   = false;  // re-enable on real hw
+// Defaults auto-select per build env so we don't have to flip flags
+// when switching between Wokwi and real hardware:
+//   * GC9A01 hardware build (esp32s3_gc9a01) → single LEFT panel only.
+//   * Wokwi sim build (esp32s3, ILI9341 driver) → all three panels
+//     (left eye, right eye, both-eye preview) so we see the full layout.
+#if defined(GC9A01_DRIVER)
+constexpr bool ENABLE_LEFT_DISPLAY    = true;
+constexpr bool ENABLE_RIGHT_DISPLAY   = false;
+constexpr bool ENABLE_PREVIEW_DISPLAY = false;
+#else
+constexpr bool ENABLE_LEFT_DISPLAY    = true;
+constexpr bool ENABLE_RIGHT_DISPLAY   = true;
 constexpr bool ENABLE_PREVIEW_DISPLAY = true;
+#endif
 
 // Preview-only: push the union of both eye bboxes instead of the full
 // 240×240 sprite (~37% less SPI data on preview). Physical eyes clip to
@@ -201,19 +217,23 @@ void setup() {
   deselectAllDisplays();
   Serial.println("[boot] CS pins configured");
 
-  // First tft.init() does the heavy lifting: SPI.begin() on HSPI, then
-  // ILI9341/ST7789/GC9A01 wake-up sequence. Each subsequent call skips
-  // SPI bring-up (tracked via _booted inside the library) and only
-  // emits the per-display command stream. Order doesn't matter — three
-  // identical panels.
-  for (int cs : {CS_LEFT, CS_RIGHT, CS_PREVIEW}) {
-    digitalWrite(cs, LOW);
+  // ONLY init displays that are enabled — tft.init() pulses the SHARED
+  // RST line every call, so iterating over disabled panels would reset
+  // (but not re-init) the enabled panels later in the loop, leaving
+  // them in a DISPLAY-OFF state. Symptom of that bug: setup finishes,
+  // screen shows the reset flash → black, then later draw calls have
+  // no visible effect.
+  auto init_panel = [](int cs_pin) {
+    digitalWrite(cs_pin, LOW);
     tft.init();
     tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
-    digitalWrite(cs, HIGH);
-    Serial.printf("[boot] display init OK on CS=%d\n", cs);
-  }
+    digitalWrite(cs_pin, HIGH);
+    Serial.printf("[boot] display init OK on CS=%d\n", cs_pin);
+  };
+  if (ENABLE_LEFT_DISPLAY)    init_panel(CS_LEFT);
+  if (ENABLE_RIGHT_DISPLAY)   init_panel(CS_RIGHT);
+  if (ENABLE_PREVIEW_DISPLAY) init_panel(CS_PREVIEW);
 
   // Sprite framebuffer — one 16-bit RGB565 buffer the size of the
   // configured panel (240×320 in Wokwi/ILI9341, 240×240 on ST7789/
@@ -239,6 +259,23 @@ void loop() {
   uint32_t now = millis();
   if ((int32_t)(now - next_frame_ms) < 0) return;
   next_frame_ms = now + FRAME_INTERVAL_MS;
+
+  // TEST diagnostic: bypass everything and cycle solid colors via
+  // tft.fillScreen. With the GC9A01 env's TFT_CS=10 build flag the
+  // library now drives CS itself — no manual select/deselect needed.
+  if (TEST_DIRECT_FILL) {
+    static uint32_t next_fill_ms = 0;
+    static uint8_t  idx          = 0;
+    if ((int32_t)(now - next_fill_ms) >= 0) {
+      next_fill_ms = now + 1000;
+      const uint16_t colors[] = { TFT_RED, TFT_GREEN, TFT_BLUE, TFT_WHITE };
+      const char*    names[]  = { "RED", "GREEN", "BLUE", "WHITE" };
+      tft.fillScreen(colors[idx % 4]);
+      Serial.printf("[test] fillScreen %s\n", names[idx % 4]);
+      ++idx;
+    }
+    return;
+  }
 
   // Pinning every frame so the autonomous re-roll inside sleepyUpdate()
   // can't overwrite the test value 8–25 s in.

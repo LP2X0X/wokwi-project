@@ -4,6 +4,12 @@
 
 #include "anim/eye_anim.h"
 #include "anim/eye_render.h"
+#include "display/display_power.h"
+#include "input/input_button.h"
+#include "input/input_face.h"
+#include "input/input_mic.h"
+#include "input/input_power.h"
+#include "mode/mode.h"
 
 // Sprite framebuffer dimensions — fixed 240×240 regardless of panel.
 // On ST7789/GC9A01 (240×240) this fills the panel exactly. On ILI9341
@@ -58,18 +64,16 @@ constexpr bool TEST_DIRECT_FILL = false;
 // CS, so disabling a display in diagram.json without flipping these to
 // false leaves the work in the loop. Set to false for any panel you're
 // not actually using in the current test config.
-// Defaults auto-select per build env so we don't have to flip flags
-// when switching between Wokwi and real hardware:
-//   * GC9A01 hardware build (esp32s3_gc9a01) → single LEFT panel only.
-//   * Wokwi sim build (esp32s3, ILI9341 driver) → all three panels
-//     (left eye, right eye, both-eye preview) so we see the full layout.
+// Defaults auto-select per build env. The GC9A01 hardware build now
+// targets a two-panel rig (left + right eye); the Wokwi sim adds a
+// third "preview" panel showing both eyes together.
 #if defined(GC9A01_DRIVER)
 constexpr bool ENABLE_LEFT_DISPLAY    = true;
-constexpr bool ENABLE_RIGHT_DISPLAY   = false;
+constexpr bool ENABLE_RIGHT_DISPLAY   = true;
 constexpr bool ENABLE_PREVIEW_DISPLAY = false;
 #else
-constexpr bool ENABLE_LEFT_DISPLAY    = true;
-constexpr bool ENABLE_RIGHT_DISPLAY   = true;
+constexpr bool ENABLE_LEFT_DISPLAY    = false;
+constexpr bool ENABLE_RIGHT_DISPLAY   = false;
 constexpr bool ENABLE_PREVIEW_DISPLAY = true;
 #endif
 
@@ -217,23 +221,27 @@ void setup() {
   deselectAllDisplays();
   Serial.println("[boot] CS pins configured");
 
-  // ONLY init displays that are enabled — tft.init() pulses the SHARED
-  // RST line every call, so iterating over disabled panels would reset
-  // (but not re-init) the enabled panels later in the loop, leaving
-  // them in a DISPLAY-OFF state. Symptom of that bug: setup finishes,
-  // screen shows the reset flash → black, then later draw calls have
-  // no visible effect.
-  auto init_panel = [](int cs_pin) {
-    digitalWrite(cs_pin, LOW);
-    tft.init();
-    tft.setRotation(0);
-    tft.fillScreen(TFT_BLACK);
-    digitalWrite(cs_pin, HIGH);
-    Serial.printf("[boot] display init OK on CS=%d\n", cs_pin);
-  };
-  if (ENABLE_LEFT_DISPLAY)    init_panel(CS_LEFT);
-  if (ENABLE_RIGHT_DISPLAY)   init_panel(CS_RIGHT);
-  if (ENABLE_PREVIEW_DISPLAY) init_panel(CS_PREVIEW);
+  // Init ALL enabled panels in one shot by asserting every enabled CS
+  // LOW simultaneously, then calling tft.init() once. The shared RST
+  // pulse hits every panel together; the init command stream goes onto
+  // SPI and every CS-asserted panel receives it. They're identical
+  // hardware so they all init to the same state.
+  //
+  // The earlier "init one at a time" pattern broke for ≥2 enabled
+  // displays because tft.init() pulses RST every call, so iteration N
+  // reset every panel initialized in iterations 1..N-1 without re-
+  // initing them. Result: only the LAST init'd panel was actually live.
+  if (ENABLE_LEFT_DISPLAY)    digitalWrite(CS_LEFT,    LOW);
+  if (ENABLE_RIGHT_DISPLAY)   digitalWrite(CS_RIGHT,   LOW);
+  if (ENABLE_PREVIEW_DISPLAY) digitalWrite(CS_PREVIEW, LOW);
+  tft.init();
+  tft.setRotation(0);
+  tft.fillScreen(TFT_BLACK);
+  deselectAllDisplays();
+  Serial.printf("[boot] display init complete (left=%d right=%d preview=%d)\n",
+                ENABLE_LEFT_DISPLAY,
+                ENABLE_RIGHT_DISPLAY,
+                ENABLE_PREVIEW_DISPLAY);
 
   // Sprite framebuffer — one 16-bit RGB565 buffer the size of the
   // configured panel (240×320 in Wokwi/ILI9341, 240×240 on ST7789/
@@ -252,6 +260,25 @@ void setup() {
 
   eyeStateInit(eyes, millis());
   next_frame_ms = millis();
+
+  // Wire the Mode FSM and its input layer. displayPowerInit must come
+  // BEFORE modeFsmInit because modeFsmInit lands in DeepSleep, which
+  // calls display_set_active(false) inside its on_enter hook.
+  // Only register CS pins for displays we actually initialized — toggling
+  // an uninitialized panel's CS while sending sleep/wake commands can
+  // wedge the Wokwi ILI9341 model.
+  int cs_pins[3];
+  uint8_t n_cs = 0;
+  if (ENABLE_LEFT_DISPLAY)    cs_pins[n_cs++] = CS_LEFT;
+  if (ENABLE_RIGHT_DISPLAY)   cs_pins[n_cs++] = CS_RIGHT;
+  if (ENABLE_PREVIEW_DISPLAY) cs_pins[n_cs++] = CS_PREVIEW;
+  displayPowerInit(&tft, cs_pins, n_cs);
+  inputFaceInit  (millis());
+  inputMicInit   (millis());
+  inputButtonInit(millis());
+  inputPowerInit (millis());
+  modeFsmInit    (eyes, millis());
+
   Serial.println("[boot] setup() complete, entering loop");
 }
 
@@ -259,6 +286,24 @@ void loop() {
   uint32_t now = millis();
   if ((int32_t)(now - next_frame_ms) < 0) return;
   next_frame_ms = now + FRAME_INTERVAL_MS;
+
+  // 1. Sample inputs. Each poll is cheap; writes continuous values to
+  //    g_world and pushes edge Events when state changes. inputFacePoll
+  //    is the only one that does real work today (stub script); the
+  //    others are no-op placeholders for real hardware.
+  inputFacePoll  (now);
+  inputMicPoll   (now);
+  inputButtonPoll(now);
+  inputPowerPoll (now);
+
+  // 2. Mode FSM. Drains the event queue into the current state, runs
+  //    its update(), maybe transitions. Sub-microsecond steady state.
+  modeFsmTick(now);
+
+  // 3. In DeepSleep we don't render. Display has already been put to
+  //    sleep by mode_deep_sleep_on_enter; skipping render saves the
+  //    ~70 ms of SPI push per frame, which is most of the power draw.
+  if (modeFsmCurrent() == ModeId::DeepSleep) return;
 
   // TEST diagnostic: bypass everything and cycle solid colors via
   // tft.fillScreen. With the GC9A01 env's TFT_CS=10 build flag the
